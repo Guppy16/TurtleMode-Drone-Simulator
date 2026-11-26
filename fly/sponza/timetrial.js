@@ -1,7 +1,7 @@
 // Time trial on top of js/race.js's RaceManager (gate crossing and lap timing), following what
 // race timers and sims do (research notes: MultiGP, RotorHazard, Velocidrone manual):
-// - Start: three 440 Hz ticks a second apart, then a random 1-5 s hold, then GO (880 Hz, 0.7 s)
-//   - RotorHazard's staging and start tones. The whoop is held until GO. Holeshot = GO to the
+// - Start: a quick one, as the user asked: arming shows "Ready" for a second, then "Go" with
+//   RotorHazard's 880 Hz start tone (0.7 s). The whoop is held until Go. Holeshot = Go to the
 //   first start/finish crossing; the clock starts there (MultiGP). Runs are 3 laps.
 // - Gates: square frames. The next gate in the accent with a dark keyline, the one after it in
 //   the quiet colour, the rest faint white; start/finish has a chequered top bar. A gate flares
@@ -15,7 +15,7 @@
 //   replayed as a ghost whoop. The best 3-lap total is stored separately for the title card.
 // - HUD (moment-based): mid-flight only the running clock, the next gate's distance and the
 //   camera angle (controls.js). Everything else appears at its moment and leaves: title card
-//   before the run, READY / SET / GO, the delta to the best lap's split at each gate (small,
+//   before the run, Ready / Go, the delta to the best lap's split at each gate (small,
 //   under the clock), the lap time at each lap, the result at the finish. Look: the Cambridge
 //   University Drone Society brand (Ubuntu, near-black plates, cyan and sage). Every font and
 //   colour is a CSS custom property in index.html's :root, and the in-world colours are
@@ -40,6 +40,7 @@ const say = (text) => {
     if (window.ttSay) return window.ttSay(text); // recording: logged and voiced separately
     try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.rate = 1.1; speechSynthesis.speak(u); } catch { /* no speech */ }
 };
+const READY_MS = 1000; // "Ready" before "Go"
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
 const ease = (x) => 1 - (1 - x) * (1 - x);
 // Deltas: at most two significant figures (-0.18, +0.4, -1.2, +12), a true minus sign, green
@@ -123,7 +124,7 @@ const CSS = `
 #tt .count { top: calc(440 * var(--hud-u)); }
 #tt .count > .pl { padding: calc(10 * var(--hud-u)) calc(26 * var(--hud-u)) calc(14 * var(--hud-u)); font-size: calc(40 * var(--hud-u)); line-height: calc(48 * var(--hud-u)); font-weight: var(--hud-w-light); }
 #tt .count .bar { margin-top: calc(8 * var(--hud-u)); height: calc(3 * var(--hud-u)); background: var(--hud-track); }
-#tt .count .bar i { display: block; height: 100%; width: 0; background: var(--hud-text); }
+#tt .count .bar i { display: block; height: 100%; background: var(--hud-text); transform-origin: 0 0; transform: scaleX(0); will-change: transform; }
 #tt .go { top: calc(70 * var(--hud-u)); will-change: transform, opacity; }
 #tt .go > .pl { padding: calc(4 * var(--hud-u)) calc(30 * var(--hud-u)) calc(8 * var(--hud-u)); font-size: calc(96 * var(--hud-u)); line-height: calc(104 * var(--hud-u)); }
 #tt .lap { top: calc(548 * var(--hud-u)); will-change: transform, opacity; }
@@ -335,7 +336,7 @@ export class TimeTrial {
         const css = document.createElement('style'); css.textContent = CSS; document.head.appendChild(css);
         this.el = document.createElement('div'); this.el.id = 'tt';
         this.el.innerHTML = '<div class="title pl"></div><div class="count mid"><div class="pl"><div></div><div class="bar"><i></i></div></div></div>'
-            + '<div class="go mid"><div class="pl">GO</div></div><div class="clock mid"><div class="pl"></div></div><div class="dist pl"></div>'
+            + '<div class="go mid"><div class="pl">Go</div></div><div class="clock mid"><div class="pl"></div></div><div class="dist pl"></div>'
             + '<div class="lap mid"><div class="pl"><div class="n q"></div><div class="t"></div><div class="r"><span></span><span class="q"></span></div></div></div>'
             + '<div class="final mid"><div class="pl">Final lap</div></div><div class="delta mid"><div class="pl"></div></div><div class="fin"></div>';
         document.body.appendChild(this.el);
@@ -425,15 +426,14 @@ export class TimeTrial {
         const unit = Math.min(innerWidth / 1280, innerHeight / 720);
         // Title card: only before arming.
         this._show(u.title, st === 'idle');
-        // Countdown: READY on the first two ticks, SET from the third through the hold; the bar
-        // fills with the ticks (not the random hold).
+        // Ready: for the second before Go, the bar filling towards it.
         this._show(u.count, st === 'countdown');
-        if (st === 'countdown') { this._text(u.countWord, this.ticks >= 3 ? 'SET' : 'READY'); this._set(u.countBar, 'w', this.ticks, (n) => (u.countBar.style.width = `${n / 3 * 100}%`)); }
-        // GO: held 0.6 s, then gone in two frames (a quick scale-out).
+        if (st === 'countdown') { this._text(u.countWord, 'Ready'); this._fx(u.countBar, '1', `scaleX(${clamp01((now - this.t0) / READY_MS).toFixed(2)})`); }
+        // Go: held 0.6 s, then gone in two frames (a quick scale-out).
         const tg = (now - this.goAt) / 1000, goOn = (st === 'go' || st === 'racing') && tg >= 0 && tg < 0.64;
         this._show(u.go, goOn);
         if (goOn) { const e = clamp01((tg - 0.6) / 0.04); this._fx(u.go, e ? (1 - e).toFixed(2) : '1', e ? `scale(${(1 + 0.35 * e).toFixed(3)})` : 'none'); }
-        // Clock: the run time, from the first start/finish crossing (0:00.000 from GO until then);
+        // Clock: the run time, from the first start/finish crossing (0:00.000 from Go until then);
         // the finish card replaces it.
         const clockOn = st === 'go' || st === 'racing';
         this._show(u.clock, clockOn);
@@ -507,7 +507,7 @@ export class TimeTrial {
     // --- run -----------------------------------------------------------------------------
     reset() {
         this.race.resetRun();
-        this.stage = 'idle'; this.count = 0; this.ticks = 0; this.goAt = -1e9; this.doneAt = 0; this.holeshot = null; this.lapTimes = []; this.total = 0;
+        this.stage = 'idle'; this.goAt = -1e9; this.doneAt = 0; this.holeshot = null; this.lapTimes = []; this.total = 0;
         this.delta = null; this.lapMoment = null; this.splits = []; this.path = []; this.runLaps = []; this._lapLine = []; this._pathFor = null; this._hadArm = false;
         this.moments = {};
         this._titleCard();
@@ -522,15 +522,11 @@ export class TimeTrial {
         if (this.stage === 'idle') {
             this.moments.title ??= now;
             // Start on arming (a fresh arm, so a run doesn't start by itself after a reset).
-            if (this._hadArm === false && armed) { this.stage = 'countdown'; this.t0 = now; this.ticks = 0; this.hold = 1000 + Math.random() * 4000; this.moments.countdown = now; }
+            if (this._hadArm === false && armed) { this.stage = 'countdown'; this.t0 = now; this.moments.countdown = now; }
             this._hadArm = armed;
         }
         if (this.stage === 'countdown') {
-            const e = now - this.t0;
-            while (this.ticks < 3 && e >= this.ticks * 1000) { this._tone(440, 0, 0.1, { type: 'triangle', gain: 0.35 }); this.ticks++; this.count = 4 - this.ticks; }
-            if (this.ticks >= 3) this.moments.set ??= now;
-            if (e >= 2000 + 400) this.count = 0; // after the third tick: an unpredictable hold
-            if (e >= 2000 + this.hold) { this.stage = 'go'; this.goAt = now; this.moments.go = now; this._tone(880, 0, 0.7, { type: 'triangle', gain: 0.4, fade: 0.25 }); }
+            if (now - this.t0 >= READY_MS) { this.stage = 'go'; this.goAt = now; this.moments.go = now; this._tone(880, 0, 0.7, { type: 'triangle', gain: 0.4, fade: 0.25 }); }
         }
         if (this.stage === 'go' || this.stage === 'racing') {
             const next = r.gates[r.nextGate], prevD = this._prevD;

@@ -245,7 +245,7 @@ export class PilotUI {
         const heads = ['Center sensitivity', 'Max rate', 'Expo'];
         const rows = AXES.map(([axis, name, c]) => `<tr data-ax="${axis}" style="--c:${c}"><td class="lab" title="Select to edit on the graph">${name.toUpperCase()}</td>${RATE_FIELDS.map(([f, , lo, hi, st]) => `<td><input type="number" data-k="${rk(axis, f)}" min="${lo}" max="${hi}" step="${st}"></td>`).join('')}<td class="n" data-m="${axis}"></td></tr>`).join('');
         p.innerHTML = `
-        <header><nav class="tabs">${TABS.map(([t, l]) => `<button data-t="${t}">${l}</button>`).join('')}</nav><button class="b x" data-a="close" title="Close (Esc or M)">Close (Esc)</button></header>
+        <header><nav class="tabs">${TABS.map(([t, l]) => `<button data-t="${t}">${l}</button>`).join('')}</nav><button class="b x" data-a="close" title="Resume (Esc or M)">Resume (Esc)</button></header>
         <div class="body">
           <section class="pg" data-p="controller">
             <div class="box"><div class="hd"><span>Radio</span><span class="st"><i class="dot"></i><span class="pd">No controller</span></span></div>
@@ -334,6 +334,8 @@ export class PilotUI {
         if (this.tab === 'flight' && this.panel.classList.contains('on')) this._drawSets();
     }
 
+    // The menu is open: the sim pauses (index.html).
+    get paused() { return this.panel.classList.contains('on'); }
     _toggle() { if (this.panel.classList.contains('on')) this._close(); else { this.panel.classList.add('on'); if (this.tab === 'rates') this._rateView(); } }
     _close() { this._endBind(); this.cap = null; this._drawBindings(); this.panel.classList.remove('on'); if (this.panel.contains(document.activeElement)) document.activeElement.blur(); }
     _tab(t) {

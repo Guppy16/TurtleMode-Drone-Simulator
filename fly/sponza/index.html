@@ -37,8 +37,19 @@
             --hud-plan-start: #fff;
             --hud-plan-line: #fff;
             --hud-debug: rgba(255,255,255,.55);
+            --hud-dim-text: rgba(255,255,255,.7); /* the fps readout */
         }
-        #hud { position: fixed; right: 10px; bottom: 8px; white-space: pre; color: var(--hud-debug); font-size: 11px; text-shadow: 0 1px 2px #000; pointer-events: none; }
+        /* Readouts on the small plate the camera angle uses (controls.js #pilot-cam): fps top right,
+           speed above the camera angle, and a brief toast for arm / reset / recover. */
+        #hud, #spd, #toast { position: fixed; pointer-events: none; white-space: nowrap; background: var(--hud-plate); font-family: var(--hud-font); font-style: var(--hud-style);
+            font-variant-numeric: var(--hud-num); font-size: calc(20 * var(--hud-u)); line-height: calc(24 * var(--hud-u)); padding: calc(4 * var(--hud-u)) calc(12 * var(--hud-u)); }
+        #hud { right: calc(40 * var(--hud-u)); top: calc(18 * var(--hud-u)); color: var(--hud-dim-text); font-weight: var(--hud-w-regular); }
+        #hud:empty { display: none; }
+        #hud.raw { right: 10px; top: auto; bottom: 8px; padding: 0; background: none; white-space: pre; color: var(--hud-debug); font: 11px/1.4 ui-monospace, Menlo, monospace; }
+        #spd { left: calc(40 * var(--hud-u)); bottom: calc(70 * var(--hud-u)); color: var(--hud-text); font-weight: var(--hud-w-light); }
+        #spd b { display: inline-block; min-width: 2ch; text-align: right; font-weight: inherit; }
+        #spd small { font-size: calc(14 * var(--hud-u)); color: var(--hud-quiet); margin-left: calc(5 * var(--hud-u)); }
+        #toast { left: 50%; top: calc(128 * var(--hud-u)); color: var(--hud-text); font-weight: var(--hud-w-regular); opacity: 0; will-change: transform, opacity; }
         #msg { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; background: rgba(0,0,0,.55); white-space: pre-line; }
         #msg.hidden { display: none; }
     </style>
@@ -57,6 +68,8 @@
 </head>
 <body>
 <div id="hud"></div>
+<div id="spd"><b></b><small>km/h</small></div>
+<div id="toast"></div>
 <div id="msg">Loading…</div>
 <script type="module">
 // Sponza atrium, flown as a tiny whoop, WebGPU only (three r187).
@@ -433,9 +446,21 @@ mountCamera = function () {
     if (camMode === 'fpv') { pod.add(camera); camera.position.set(0, 0, 0); camera.rotation.set(THREE.MathUtils.degToRad(uptilt), 0, 0); }
     else scene.add(camera);
 };
+// Toast: one element, a word for a beat (fade in, hold, fade out; transform and opacity only),
+// timed on the frame clock so it also plays in offline recordings.
+const toastEl = document.getElementById('toast'), spdEl = document.querySelector('#spd b');
+let toastAt = -1e9, toastOp = '', frameNow = 0;
+function toast(text) { toastEl.textContent = text; toastAt = frameNow; }
+function drawToast(t) {
+    const e = (t - toastAt) / 1000, a = e < 0 || e > 1.1 ? 0 : Math.min(1, e / 0.12, (1.1 - e) / 0.25);
+    const op = a.toFixed(2);
+    if (op === toastOp) return;
+    toastOp = op; toastEl.style.opacity = op;
+    toastEl.style.transform = `translateX(-50%) translateY(${((1 - Math.min(1, e / 0.12)) * 6).toFixed(1)}px)`;
+}
 // Reset: back to the spawn, disarmed-safe (it stays armed if the switch is armed, like a real
 // sim's "respawn"), and out of any snag.
-function resetDrone() { physics.reset(); snag.t = 0; snag.hold = null; safe.length = 0; tt?.reset(); }
+function resetDrone() { physics.reset(); snag.t = 0; snag.hold = null; safe.length = 0; tt?.reset(); toast('Reset'); }
 // Recover (tryfpv-style respawn): back to where the whoop last flew freely, dropped onto the floor
 // below that point, level, keeping its heading and staying armed. Safe points are sampled every
 // 0.25 s while clear of walls and cloth; the newest ~1 s is skipped (that's usually the crash).
@@ -460,7 +485,7 @@ function recoverDrone() {
     physics.reset();
     physics.spawn.position.copy(keep.p); physics.spawn.quaternion.copy(keep.q);
     snag.t = 0; snag.hold = null; safe.length = Math.max(0, safe.length - 5);
-    snag.msgUntil = performance.now() + 900; snag.msg = 'RECOVER';
+    toast('Recovered');
 }
 // G cycles the lighting look; it reloads, because the bounce light is baked from the sun.
 function nextLook() {
@@ -591,14 +616,14 @@ function syncCamera(dt) {
 // airframe (velocity and spin decay in ~0.1 s) and loads the props; a hit faster than 2.5 m/s, or
 // staying in it for 0.4 s, is a tangle: the whoop hangs in the cloth, props stalled, and resets
 // after a second. Leaves only drag (~0.35 s), and a little.
-const snag = { t: 0, hold: null, msgUntil: 0 }; let snagCount = 0;
+const snag = { t: 0, hold: null }; let snagCount = 0;
 const _sp = new THREE.Vector3(), _st = {};
 function touching(tree, p, r) { if (!tree) return false; _sp.set(p.x, p.y, p.z); const h = tree.closestPointToPoint(_sp, _st, 0, r); return !!h && h.distance < r; }
 function updateSnag(dt, now) {
     const b = physics.droneBody, p = b.position;
     if (snag.hold) {
         b.position.copy(snag.hold.pos); b.velocity.set(0, 0, 0); b.angularVelocity.scale(Math.exp(-dt / 0.05), b.angularVelocity);
-        if (now > snag.hold.until) { resetDrone(); snag.msgUntil = now + 800; snag.msg = 'RESET'; }
+        if (now > snag.hold.until) resetDrone();
         return;
     }
     if (touching(clothBVH, p, 0.06)) {
@@ -617,6 +642,10 @@ function updateSnag(dt, now) {
 // --- Loop ---
 let lastArmed = false;
 let last = performance.now(), frames = 0, fpsT = last, fps = 0;
+// Sim time (ms): what the race, the countdown, the ghost, snags and the autopilot run on. It stops
+// while the menu is open (paused), so nothing counts the pause.
+let simNow = last;
+let spdT = 0, spdTxt = '';
 const frameTimes = [], gpuTimes = [];
 const mode = q.get('mode') || 'fly';
 if (mode === 'bench') {
@@ -641,17 +670,18 @@ if (mode === 'bench') {
     frameTimes.sort((x, y) => x - y);
     const avg = (performance.now() - tS) / N;
     window.benchResult = { preset: q.get('q') || 'med', aa: window.aaMode, ...gpu, scale: preset.scale, w: renderer.domElement.width, h: renderer.domElement.height, fps: Math.round(1000 / avg * 10) / 10, p50: frameTimes[N >> 1].toFixed(1), p95: frameTimes[Math.floor(N * 0.95)].toFixed(1), loadMs, bvhMs, probeMs, dds: !!useDDS, spikes: spikes.slice(0, 30), nSpikes: spikes.length, adapter: renderer.backend.adapter?.info?.description || renderer.backend.adapter?.info?.vendor || '' };
-    hud.textContent = JSON.stringify(window.benchResult);
+    document.getElementById('spd').style.display = 'none';
+    hud.className = 'raw'; hud.textContent = JSON.stringify(window.benchResult);
 } else {
     const autolap = mode === 'autolap' && tt ? new Autopilot({ physics, gates: withFacing(SPONZA_TRACK.gates), normalOf: (g) => race.gates[SPONZA_TRACK.gates.findIndex((x) => x.name === g.name)].normal,
         vmax: Number(q.get('vmax') || 3.6) }) : null;
     if (autolap && q.get('rec') !== 'offline') startAudio();
     if (autolap && q.get('rec')) hud.style.display = 'none';
     // Clean plates for UI mockups: no HTML overlays (nohud=1), no path line (nopath=1).
-    if (q.get('nohud') === '1') { const st = document.createElement('style'); st.textContent = '#hud,#msg,#tt,#tt-arrow,#pilot-sticks,#pilot-cam,#pilot-status{display:none!important}'; document.head.appendChild(st); }
+    if (q.get('nohud') === '1') { const st = document.createElement('style'); st.textContent = '#hud,#spd,#toast,#msg,#tt,#tt-arrow,#pilot-sticks,#pilot-cam,#pilot-status{display:none!important}'; document.head.appendChild(st); }
     if (q.get('nopath') === '1' && tt) tt._path = () => {};
     const shot = autolap && q.get('shot') ? [q.get('shot').split('@')[0], Number(q.get('shot').split('@')[1] || 0)] : null;
-    const auto = mode === 'flytest', track = []; let contacts = 0; const autoT0 = performance.now();
+    const auto = mode === 'flytest', track = []; let contacts = 0; const autoT0 = performance.now(); simNow = autoT0;
     // Hover throttle for this airframe, from the thrust curve (thrust = T * mix(t, t^2, curve)).
     const hoverT = (() => { const tw = 1 / ui.set.twr, c = physics.params.thrustCurve; let lo = 0, hi = 1; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; ((1 - c) * m + c * m * m < tw) ? lo = m : hi = m; } return lo; })();
     // Shader warm-up: WebGPU builds a pipeline the first time each material is drawn, which stalls
@@ -662,11 +692,8 @@ if (mode === 'bench') {
         scene.traverse((o) => { if (o.isMesh && o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
         draw(); await new Promise((r) => requestAnimationFrame(r));
         culled.forEach((o) => (o.frustumCulled = true));
-        last = performance.now(); fpsT = last;
+        last = performance.now(); fpsT = last; simNow = autoT0;
     }
-    // Dropped frames: a frame taking over 1.5 vsync intervals (~25 ms at 60 Hz). The fps average
-    // hides them, so the HUD counts them over the last 5 s.
-    const drops = [];
     // Offline recording (mode=autolap&rec=offline): no live loop. The recorder calls recStep()
     // once per video frame, which advances the sim by exactly 1/60 s and draws, so the video is
     // smooth whatever this machine manages in real time. Sound is logged per frame (sticks,
@@ -680,12 +707,24 @@ if (mode === 'bench') {
         for (const k of ['_tone', '_blip', '_buzz']) tt[k] = (...a) => recLog.sfx.push([recT(), k, a]);
         window.ttSay = (text) => recLog.speech.push([recT(), text]);
     }
+    let wasPaused = false;
     const tick = (vnow) => {
-        const now = vnow ?? performance.now(), dt = REC ? 1 / 60 : Math.min((now - last) / 1000, 0.1);
-        if (now - last > 25) drops.push(now);
-        while (drops.length && drops[0] < now - 5000) drops.shift();
-        last = now;
+        const real = vnow ?? performance.now();
+        let dt = REC ? 1 / 60 : Math.min((real - last) / 1000, 0.1);
+        last = real; frameNow = real;
         let { axes, armed } = ui.update();
+        // Pause: the menu (Esc) freezes the sim, the race and the motor sound; the scene still
+        // draws. The first frame back takes at most one 60 Hz step, so nothing jumps.
+        const paused = ui.paused && !REC;
+        if (paused !== wasPaused) {
+            wasPaused = paused;
+            if (audio.ctx) paused ? audio.ctx.suspend() : audio.ctx.resume();
+            try { paused ? speechSynthesis.pause() : speechSynthesis.resume(); } catch { /* no speech */ }
+            if (!paused) dt = Math.min(dt, 1 / 60);
+        }
+        if (paused) { draw(); frames++; drawReadouts(real); return; }
+        simNow += dt * 1000;
+        const now = simNow;
         if (snag.hold || tt?.holding) axes = { ...axes, throttle: 0 };
         if (autolap) {
             // Demo flight (mode=autolap): arm, wait out the countdown, then the autopilot flies
@@ -723,6 +762,8 @@ if (mode === 'bench') {
                 window.benchResult = { mode: 'flytest', race: RACE && { ...race.status(), stage: tt?.stage, path: window.ttPath }, sides: window.sides, recovered: window.recovered, probeBox: window.probeBox, probeMs, inside, contacts, snagged: snagCount, cloth: cb && [cb.min.toArray().map((v) => +v.toFixed(1)), cb.max.toArray().map((v) => +v.toFixed(1))], maxY: Math.max(...track.map((r) => r[2])).toFixed(2), path: track.filter((_, i) => i % 30 === 0) };
             }
         }
+        // Arm changes are toasts; disarmed mid-run also stays up as a status (below).
+        if (armed !== lastArmed && !(!armed && (tt?.stage === 'go' || tt?.stage === 'racing'))) toast(armed ? 'Armed' : 'Disarmed');
         physics.setInputs(axes, armed); lastArmed = armed;
         physics.step(dt);
         updateSnag(dt, now);
@@ -739,24 +780,32 @@ if (mode === 'bench') {
         if (audio.ctx) audio.update(axes, armed && !snag.hold, physics.droneBody.velocity.length(), camMode === 'fpv' ? 0 : 0.5);
         draw();
         frames++;
-        // Debug line (bottom right, small): rewritten only with the fps, twice a second.
-        if (now - fpsT > 500) {
-            fps = Math.round(frames * 1000 / (now - fpsT)); frames = 0; fpsT = now;
-            const v = physics.droneBody.velocity.length();
-            hud.textContent = `${fps} fps  ${drops.length} drops/5s  ${q.get('q') || 'med'} ${lookName} x${preset.scale}  ${(v * 3.6).toFixed(0)} km/h${audio.ctx ? '' : '  click for sound'}`;
-        }
-        // Status: warnings always; in a time trial the arm state shows only if disarmed mid-run
-        // (the title card says how to arm, the countdown shows it armed).
+        drawReadouts(real);
+        // Status: lasting states only (arm changes, resets and recovers are toasts): tangled, and
+        // disarmed in the middle of a run.
         const racing = tt && (tt.stage === 'go' || tt.stage === 'racing');
-        ui.setStatus(snag.hold ? '<span class="warn">TANGLED IN CLOTH</span>' : now < snag.msgUntil ? `<span class="warn">${snag.msg || 'RESET'}</span>`
-            : tt && !racing ? '' : lastArmed ? (tt ? '' : '<span class="armed">ARMED</span>') : '<span class="disarmed">DISARMED</span>');
+        ui.setStatus(snag.hold ? '<span class="warn">Tangled in cloth</span>' : racing && !lastArmed ? '<span class="disarmed">Disarmed</span>' : '');
         // ?shot=<moment>@<ms> (autolap): freeze on a HUD moment for a screenshot (moments are named in
-        // timetrial.js: title, countdown, set, go, start, g<lap>.<gate>, lap<n>, done).
+        // timetrial.js: title, countdown, go, start, g<lap>.<gate>, lap<n>, done).
         if (shot && tt && tt.moments[shot[0]] != null && now >= tt.moments[shot[0]] + shot[1] && !window.benchResult) {
             renderer.setAnimationLoop(null); window.benchResult = { shot: shot.join('@'), stage: tt.stage, fps };
         }
         if (REC) { recLog.frames.push([recT(), axes.throttle, axes.yaw, axes.pitch, axes.roll, armed && !snag.hold ? 1 : 0, physics.droneBody.velocity.length()]); ui.axes = axes; ui._draw(); }
     };
+    // fps (twice a second, top right) and speed (10 Hz, bottom left), written only on change.
+    function drawReadouts(real) {
+        drawToast(real);
+        if (real - fpsT > 500) {
+            fps = Math.round(frames * 1000 / (real - fpsT)); frames = 0; fpsT = real;
+            const s = `${fps} fps`;
+            if (hud.textContent !== s) hud.textContent = s;
+        }
+        if (real - spdT >= 100) {
+            spdT = real;
+            const s = String(Math.round(physics.droneBody.velocity.length() * 3.6));
+            if (s !== spdTxt) { spdTxt = s; spdEl.textContent = s; }
+        }
+    }
     if (REC) {
         window.recStep = async () => {
             recNow += 1000 / 60; tick(recNow);
