@@ -393,12 +393,24 @@ if (q.get('mode') === 'survey') {
         const freeAll = (o, d) => Math.min(...[bvh, clothBVH, plantBVH].filter(Boolean).map((B) => B.raycastFirst(new THREE.Ray(o, d.clone().normalize()), THREE.DoubleSide)?.distance ?? 99));
         const G = withFacing(SPONZA_TRACK.gates).map((g) => {
             const yaw = THREE.MathUtils.degToRad(g.yaw), pit = THREE.MathUtils.degToRad(g.pitch);
-            return { ...g, p: new THREE.Vector3(g.x, g.y, g.z), n: new THREE.Vector3(Math.sin(yaw) * Math.cos(pit), Math.sin(pit), -Math.cos(yaw) * Math.cos(pit)) };
+            return { ...g, p: new THREE.Vector3(g.x, g.fy ?? g.y, g.z), n: new THREE.Vector3(Math.sin(yaw) * Math.cos(pit), Math.sin(pit), -Math.cos(yaw) * Math.cos(pit)) };
         });
         const gates = G.map((g) => {
             const u = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), g.n).normalize(), v = new THREE.Vector3().crossVectors(g.n, u);
-            let minR = 99; for (let k = 0; k < 16; k++) { const a2 = k / 16 * Math.PI * 2; minR = Math.min(minR, freeAll(g.p, u.clone().multiplyScalar(Math.cos(a2)).addScaledVector(v, Math.sin(a2)))); }
-            return { name: g.name, yaw: Math.round(g.yaw), pitch: Math.round(g.pitch), planeFree: +minR.toFixed(2), ahead: +freeAll(g.p, g.n).toFixed(2), behind: +freeAll(g.p, g.n.clone().negate()).toFixed(2) };
+            // Rectangular gates: the frame's outer edge (opening w x h plus 27 mm bars) against the
+            // free distance across (the corridor), up and down, and towards each outer corner,
+            // also from 15 cm in front of and behind the plane (window reveals, column bases).
+            const hw = (g.w ?? 1) / 2 + 0.027, hh = (g.h ?? 1) / 2 + 0.027, res = { name: g.name, w: g.w, h: g.h };
+            let worst = 99, worstAt = '';
+            const chk = (val, at) => { if (val < worst) { worst = val; worstAt = at; } };
+            for (const off of [0, 0.15, -0.15]) {
+                const o = g.p.clone().addScaledVector(g.n, off);
+                const L = freeAll(o, u.clone().negate()), Rr = freeAll(o, u), U = freeAll(o, v), D = freeAll(o, v.clone().negate());
+                if (off === 0) Object.assign(res, { left: +L.toFixed(2), right: +Rr.toFixed(2), up: +U.toFixed(2), down: +D.toFixed(2), corridor: +(L + Rr).toFixed(2), centreOff: +((Rr - L) / 2).toFixed(2) });
+                chk(L - hw, `left@${off}`); chk(Rr - hw, `right@${off}`); chk(U - hh, `up@${off}`); chk(D - hh, `down@${off}`);
+                for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { const d = u.clone().multiplyScalar(sx * hw).addScaledVector(v, sy * hh); chk(freeAll(o, d) - d.length(), `${sx < 0 ? 'left' : 'right'}-${sy < 0 ? 'low' : 'high'}@${off}`); }
+            }
+            return { ...res, yaw: Math.round(g.yaw), clearance: +worst.toFixed(3), worstAt, ok: worst > 0.05, ahead: +freeAll(g.p, g.n).toFixed(2), behind: +freeAll(g.p, g.n.clone().negate()).toFixed(2) };
         });
         const pts = linePoints(G, THREE.Vector3, (g) => g.n);
         const curve = new THREE.CatmullRomCurve3(pts, true, 'centripetal'), N = Math.ceil(curve.getLength() / 0.05);
@@ -413,7 +425,50 @@ if (q.get('mode') === 'survey') {
         for (let k = 0; k < N; k += 2) { const p0 = curve.getPointAt(k / N), p1 = curve.getPointAt(((k + 4) % N) / N), p2 = curve.getPointAt(((k + 8) % N) / N);
             const a3 = p0.distanceTo(p1), b3 = p1.distanceTo(p2), c3 = p0.distanceTo(p2), ar = new THREE.Vector3().crossVectors(p1.clone().sub(p0), p2.clone().sub(p0)).length() / 2;
             const R = ar > 1e-6 ? (a3 * b3 * c3) / (4 * ar) : 99; if (R < minRad) { minRad = R; radAt = p1.toArray().map((v) => +v.toFixed(2)); } }
-        window.benchResult = { gates, line: { length: +curve.getLength().toFixed(1), nHits: hits.length, hits: hits.slice(0, 12), minClearance: +minC.toFixed(2), minAt, minTurnRadius: +minRad.toFixed(2), radAt } };
+        // Fit (&fit=1): the largest frame each gate's opening allows. From the gate's centre
+        // height, the free span across (min over the plane and 15 cm either side), then for every
+        // 5 cm column of that span the clear height (floor or parapet below, vault or arch above,
+        // min over the three planes). The best interval maximises the clear area; the frame keeps
+        // 10 cm off everything, its 27 mm bars outside the opening. Then the whole frame outline
+        // is checked by rays from the centre every 5 cm and shrunk until it clears. Over the open
+        // courtyard nothing bounds it from above, so the height is capped (`cap`).
+        const fits = q.get('fit') === '1' ? G.map((g) => {
+            const u = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), g.n).normalize(), up = new THREE.Vector3(0, 1, 0), C = 0.1, B = 0.027, cap = 3;
+            const offs = [0, 0.15, -0.15].map((o) => g.p.clone().addScaledVector(g.n, o));
+            const L = Math.min(...offs.map((o) => freeAll(o, u.clone().negate()))), Rr = Math.min(...offs.map((o) => freeAll(o, u)));
+            const cols = [];
+            // No wider than the gate is now (its width was fitted to the corridor; wider spans
+            // reach through the arcade's arches): this fills the height.
+            const span = Math.min(4, (g.w ?? 4) / 2 + C + B);
+            for (let sx = -Math.min(L, span) + 0.02; sx < Math.min(Rr, span) - 0.02; sx += 0.05) {
+                let top = cap, bot = -cap;
+                for (const o of offs) { const c = o.clone().addScaledVector(u, sx); top = Math.min(top, freeAll(c, up)); bot = Math.max(bot, -freeAll(c, up.clone().negate())); }
+                cols.push([sx, top, bot]);
+            }
+            let best = null;
+            // The frame stays round the flown line: the interval must cover the gate's centre
+            // +-25 cm (else it wanders through an arch into the next space).
+            for (let i = 0; i < cols.length && cols[i][0] <= -0.25; i++) { let top = cap, bot = -cap; for (let j = i; j < cols.length; j++) {
+                if (cols[j][0] < 0.25) { top = Math.min(top, cols[j][1]); bot = Math.max(bot, cols[j][2]); continue; }
+                top = Math.min(top, cols[j][1]); bot = Math.max(bot, cols[j][2]);
+                const w = cols[j][0] - cols[i][0] - 2 * (C + B), h = top - bot - 2 * (C + B);
+                if (w > 0.3 && h > 0.3 && (!best || w * h > best.w * best.h)) best = { w, h, cu: (cols[i][0] + cols[j][0]) / 2, cy: (top + bot) / 2 };
+            } }
+            if (!best) return { name: g.name, fail: true };
+            // Check the outline from the centre; shrink 4% at a time until it clears.
+            let ok = false, k = 0;
+            for (; k < 25 && !ok; k++) {
+                const c = g.p.clone().addScaledVector(u, best.cu).addScaledVector(up, best.cy), hw = best.w / 2 + B + C, hh = best.h / 2 + B + C;
+                ok = true;
+                for (const o of [0, 0.15, -0.15]) { const cc = c.clone().addScaledVector(g.n, o);
+                    for (let t = -1; t <= 1.0001 && ok; t += 0.05 / Math.max(hw, hh)) for (const [ex, ey] of [[t * hw, hh], [t * hw, -hh], [hw, t * hh], [-hw, t * hh]]) {
+                        const d = u.clone().multiplyScalar(ex).addScaledVector(up, ey); if (freeAll(cc, d) < d.length() - 1e-3) { ok = false; break; } } }
+                if (!ok) { best.w *= 0.96; best.h *= 0.96; }
+            }
+            const c = g.p.clone().addScaledVector(u, best.cu).addScaledVector(up, best.cy);
+            return { name: g.name, x: +c.x.toFixed(2), y: +c.y.toFixed(2), z: +c.z.toFixed(2), w: +best.w.toFixed(2), h: +best.h.toFixed(2), shrinks: k - 1, ok };
+        }) : null;
+        window.benchResult = { gates, fits, line: { length: +curve.getLength().toFixed(1), nHits: hits.length, hits: hits.slice(0, 12), minClearance: +minC.toFixed(2), minAt, minTurnRadius: +minRad.toFixed(2), radAt } };
     }
     throw new Error('survey done');
 }
@@ -855,13 +910,13 @@ if (mode === 'thrtest') {
             armed = t > 1.0;
             if (!tt || tt.stage === 'idle' || tt.stage === 'countdown') axes = { throttle: 0, yaw: 0, pitch: 0, roll: 0 };
             else { const a = autolap.update(dt); axes = { ...a, throttle: thr.inv(a.throttle) }; autolap.maxErr = Math.max(autolap.maxErr || 0, a.err); }
-            if (physics._inContact && t > 1 && tt?.stage === 'racing') contacts++;
+            if (physics._inContact && t > 1 && tt?.stage === 'racing') { contacts++; if ((autolap.hits ||= []).length < 12) { const p = physics.droneBody.position; autolap.hits.push([+t.toFixed(2), +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)]); } }
             if (tt?.stage === 'racing' && now - autolap.lastNow > 25) autolap.long = (autolap.long || 0) + 1;
             if (tt?.stage === 'racing') { autolap.rT0 ??= now; autolap.rN = (autolap.rN || 0) + 1; autolap.rT1 = now; }
             autolap.lastNow = now;
             if (tt?.stage === 'done') autolap.doneAt ??= t;
             if (!window.benchResult && (autolap.doneAt && t > autolap.doneAt + 3 || t > Number(q.get('tEnd') || 120))) {
-                window.benchResult = { mode: 'autolap', stage: tt?.stage, laps: tt?.lapTimes, holeshot: tt?.holeshot, maxErr: +(autolap.maxErr || 0).toFixed(2), contactFrames: contacts, snags: snagCount, t: +t.toFixed(1), fps, longFrames: autolap.long || 0, racingFps: autolap.rN > 1 ? +((autolap.rN - 1) * 1000 / (autolap.rT1 - autolap.rT0)).toFixed(1) : null,
+                window.benchResult = { mode: 'autolap', stage: tt?.stage, laps: tt?.lapTimes, holeshot: tt?.holeshot, maxErr: +(autolap.maxErr || 0).toFixed(2), contactFrames: contacts, contactAt: autolap.hits || [], snags: snagCount, t: +t.toFixed(1), fps, longFrames: autolap.long || 0, racingFps: autolap.rN > 1 ? +((autolap.rN - 1) * 1000 / (autolap.rT1 - autolap.rT0)).toFixed(1) : null,
                     hudMs: autolap.hudN ? +(autolap.hudMs / autolap.hudN).toFixed(3) : null, hudMaxMs: +(autolap.hudMax || 0).toFixed(2), pace: paceReport() };
             }
         }

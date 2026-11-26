@@ -141,7 +141,8 @@ export class RaceManager {
             // `pitch` tilts the direction of travel out of the horizontal, so a gate can lie flat
             // in a hatch and be taken on the way up or down. Absent on ordinary gates.
             const pitch = THREE.MathUtils.degToRad(g.pitch || 0);
-            const position = new THREE.Vector3(g.x, g.y, g.z);
+            // `fy`: the frame's centre height when it differs from the line through it (tall gates).
+            const position = new THREE.Vector3(g.x, g.fy ?? g.y, g.z);
             const normal = new THREE.Vector3(
                 Math.sin(yaw) * Math.cos(pitch),
                 Math.sin(pitch),
@@ -165,7 +166,10 @@ export class RaceManager {
             label.position.set(position.x, position.y + halfHeight + 0.9, position.z);
             this.group.add(label);
 
-            this.gates.push({ name: g.name, position, normal, radius, mesh, label, index: i });
+            // Rectangular square-track gates may give a width `w` and height `h` (m); otherwise the
+            // opening is 2 x radius each way.
+            const halfW = Number.isFinite(g.w) ? g.w / 2 : radius, halfH = Number.isFinite(g.h) ? g.h / 2 : radius;
+            this.gates.push({ name: g.name, position, normal, radius, halfW, halfH, mesh, label, index: i });
         });
 
         this.resetRun();
@@ -337,13 +341,13 @@ export class RaceManager {
         const along = this._radial.dot(n);
         this._radial.addScaledVector(n, -along);
 
-        // Square gates (track.square): inside the frame opening, half-width `radius`, measured
-        // along the gate's own horizontal and vertical axes.
+        // Square gates (track.square): inside the frame opening, half-width `halfW` and
+        // half-height `halfH`, measured along the gate's own horizontal and vertical axes.
         if (this.track && this.track.square) {
             const ux = -n.z, uz = n.x, ul = Math.hypot(ux, uz) || 1; // horizontal across the gate
             const across = (this._radial.x * ux + this._radial.z * uz) / ul;
             const up = Math.sqrt(Math.max(0, this._radial.lengthSq() - across * across));
-            return Math.abs(across) <= gate.radius && up <= gate.radius ? t : null;
+            return Math.abs(across) <= gate.halfW && up <= gate.halfH ? t : null;
         }
         return this._radial.length() <= gate.radius ? t : null;
     }
