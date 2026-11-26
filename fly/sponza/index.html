@@ -7,7 +7,36 @@
     <style>
         html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px/1.4 ui-monospace, Menlo, monospace; color: #fff; }
         canvas { display: block; }
-        #hud { position: fixed; left: 10px; top: 8px; white-space: pre; text-shadow: 0 1px 2px #000; pointer-events: none; }
+        /* The HUD's look in one place: every font and colour the in-game HUD uses (timetrial.js,
+           controls.js). In-world gate and path colours are GATE_COLOURS in timetrial.js. Sizes
+           are in --hud-u, one 1280x720 pixel scaled to the window. The look is the Cambridge
+           University Drone Society brand: Ubuntu (fonts/, Ubuntu Font Licence), near-black plates,
+           cyan and sage. */
+        @font-face { font-family: 'Ubuntu'; font-weight: 300; font-style: normal; font-display: block; src: url(fonts/Ubuntu-Light.ttf) format('truetype'); }
+        @font-face { font-family: 'Ubuntu'; font-weight: 400; font-style: normal; font-display: block; src: url(fonts/Ubuntu-Regular.ttf) format('truetype'); }
+        :root {
+            --hud-u: min(calc(100vw / 1280), calc(100vh / 720));
+            --hud-font: 'Ubuntu', system-ui, sans-serif;
+            --hud-style: normal;
+            --hud-w-light: 300; --hud-w-regular: 400;
+            --hud-num: tabular-nums lining-nums;
+            --hud-text: #fff;
+            --hud-accent: #00d3f0;              /* cyan: the next gate, key highlights, best lap */
+            --hud-quiet: #a3c1ad;               /* sage: quiet info (labels, previous best, icons) */
+            --hud-keyline: #14140a;             /* near-black keylines */
+            --hud-plate: rgba(20,20,10,.80);    /* the plate behind every readout */
+            --hud-panel: rgba(20,20,10,.84);    /* the finish screen's side panel */
+            --hud-dim: rgba(0,0,0,.45);         /* dims the scene behind the finish screen */
+            --hud-good: #8bd74a;                /* delta: ahead */
+            --hud-bad: #ff6b57;                 /* delta: behind */
+            --hud-track: rgba(255,255,255,.2);
+            --hud-plan-wall: rgba(163,193,173,.5);
+            --hud-plan-gate: #fff;
+            --hud-plan-start: #fff;
+            --hud-plan-line: #fff;
+            --hud-debug: rgba(255,255,255,.55);
+        }
+        #hud { position: fixed; right: 10px; bottom: 8px; white-space: pre; color: var(--hud-debug); font-size: 11px; text-shadow: 0 1px 2px #000; pointer-events: none; }
         #msg { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; background: rgba(0,0,0,.55); white-space: pre-line; }
         #msg.hidden { display: none; }
     </style>
@@ -443,7 +472,7 @@ Object.assign(audio, { minFrequency: 170, maxFrequency: 640, bladeCount: 4, maxT
 const startAudio = () => { if (!audio.ctx) audio.start(); };
 addEventListener('pointerdown', startAudio); addEventListener('keydown', startAudio);
 applySettings(ui.set);
-if (RACE) tt = new TimeTrial({ scene, race, track: SPONZA_TRACK, camera, getAudio: () => { if (!audio.ctx) return null; if (audio.ctx.state === 'suspended') audio.ctx.resume(); return audio.ctx; } });
+if (RACE) tt = new TimeTrial({ scene, race, track: SPONZA_TRACK, camera, toneMap: () => [renderer.toneMappingExposure, renderer.toneMapping === THREE.ACESFilmicToneMapping], keyLabel: (id) => ui.keyLabel(id), getAudio: () => { if (!audio.ctx) return null; if (audio.ctx.state === 'suspended') audio.ctx.resume(); return audio.ctx; } });
 mountCamera();
 const whoop = new THREE.Mesh(new THREE.TorusGeometry(0.028, 0.006, 6, 16).rotateX(Math.PI / 2), new THREE.MeshStandardNodeMaterial({ color: 0x222222, roughness: 0.6 }));
 const whoopG = new THREE.Group();
@@ -616,6 +645,7 @@ if (mode === 'bench') {
     // Clean plates for UI mockups: no HTML overlays (nohud=1), no path line (nopath=1).
     if (q.get('nohud') === '1') { const st = document.createElement('style'); st.textContent = '#hud,#msg,#tt,#tt-arrow,#pilot-sticks,#pilot-cam,#pilot-status{display:none!important}'; document.head.appendChild(st); }
     if (q.get('nopath') === '1' && tt) tt._path = () => {};
+    const shot = autolap && q.get('shot') ? [q.get('shot').split('@')[0], Number(q.get('shot').split('@')[1] || 0)] : null;
     const auto = mode === 'flytest', track = []; let contacts = 0; const autoT0 = performance.now();
     // Hover throttle for this airframe, from the thrust curve (thrust = T * mix(t, t^2, curve)).
     const hoverT = (() => { const tw = 1 / ui.set.twr, c = physics.params.thrustCurve; let lo = 0, hi = 1; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; ((1 - c) * m + c * m * m < tw) ? lo = m : hi = m; } return lo; })();
@@ -660,10 +690,13 @@ if (mode === 'bench') {
             if (!tt || tt.stage === 'idle' || tt.stage === 'countdown') axes = { throttle: 0, yaw: 0, pitch: 0, roll: 0 };
             else { const a = autolap.update(dt); axes = a; autolap.maxErr = Math.max(autolap.maxErr || 0, a.err); }
             if (physics._inContact && t > 1 && tt?.stage === 'racing') contacts++;
-            if (tt?.stage === 'racing' && now - autolap.lastNow > 25) autolap.long = (autolap.long || 0) + 1; autolap.lastNow = now;
+            if (tt?.stage === 'racing' && now - autolap.lastNow > 25) autolap.long = (autolap.long || 0) + 1;
+            if (tt?.stage === 'racing') { autolap.rT0 ??= now; autolap.rN = (autolap.rN || 0) + 1; autolap.rT1 = now; }
+            autolap.lastNow = now;
             if (tt?.stage === 'done') autolap.doneAt ??= t;
             if (!window.benchResult && (autolap.doneAt && t > autolap.doneAt + 3 || t > Number(q.get('tEnd') || 120))) {
-                window.benchResult = { mode: 'autolap', stage: tt?.stage, laps: tt?.lapTimes, holeshot: tt?.holeshot, maxErr: +(autolap.maxErr || 0).toFixed(2), contactFrames: contacts, snags: snagCount, t: +t.toFixed(1), fps, longFrames: autolap.long || 0 };
+                window.benchResult = { mode: 'autolap', stage: tt?.stage, laps: tt?.lapTimes, holeshot: tt?.holeshot, maxErr: +(autolap.maxErr || 0).toFixed(2), contactFrames: contacts, snags: snagCount, t: +t.toFixed(1), fps, longFrames: autolap.long || 0, racingFps: autolap.rN > 1 ? +((autolap.rN - 1) * 1000 / (autolap.rT1 - autolap.rT0)).toFixed(1) : null,
+                    hudMs: autolap.hudN ? +(autolap.hudMs / autolap.hudN).toFixed(3) : null, hudMaxMs: +(autolap.hudMax || 0).toFixed(2) };
             }
         }
         if (auto) {
@@ -689,17 +722,34 @@ if (mode === 'bench') {
         physics.step(dt);
         updateSnag(dt, now);
         trackSafe(dt);
+        const hud0 = performance.now();
         tt?.update(dt, now, physics.droneBody.position, armed);
+        let hudMs = performance.now() - hud0;
         syncCamera(dt);
+        const hud1 = performance.now();
+        tt?.draw(now);
+        hudMs += performance.now() - hud1;
+        if (autolap && tt?.stage === 'racing') { autolap.hudMs = (autolap.hudMs || 0) + hudMs; autolap.hudN = (autolap.hudN || 0) + 1; autolap.hudMax = Math.max(autolap.hudMax || 0, hudMs); }
         autoExposure(dt);
         if (audio.ctx) audio.update(axes, armed && !snag.hold, physics.droneBody.velocity.length(), camMode === 'fpv' ? 0 : 0.5);
         draw();
         frames++;
-        if (now - fpsT > 500) { fps = Math.round(frames * 1000 / (now - fpsT)); frames = 0; fpsT = now; }
-        const v = physics.droneBody.velocity.length();
-        hud.textContent = `${fps} fps  ${drops.length} drops/5s  ${q.get('q') || 'med'} ${lookName} x${preset.scale}  ${(v * 3.6).toFixed(0)} km/h  tilt ${uptilt}°\nEsc menu, Space reset, R recover, G look, ↑↓ tilt, C camera${audio.ctx ? '' : ', click for sound'}`;
+        // Debug line (bottom right, small): rewritten only with the fps, twice a second.
+        if (now - fpsT > 500) {
+            fps = Math.round(frames * 1000 / (now - fpsT)); frames = 0; fpsT = now;
+            const v = physics.droneBody.velocity.length();
+            hud.textContent = `${fps} fps  ${drops.length} drops/5s  ${q.get('q') || 'med'} ${lookName} x${preset.scale}  ${(v * 3.6).toFixed(0)} km/h${audio.ctx ? '' : '  click for sound'}`;
+        }
+        // Status: warnings always; in a time trial the arm state shows only if disarmed mid-run
+        // (the title card says how to arm, the countdown shows it armed).
+        const racing = tt && (tt.stage === 'go' || tt.stage === 'racing');
         ui.setStatus(snag.hold ? '<span class="warn">TANGLED IN CLOTH</span>' : now < snag.msgUntil ? `<span class="warn">${snag.msg || 'RESET'}</span>`
-            : lastArmed ? '<span class="armed">ARMED</span>' : '<span class="disarmed">DISARMED</span>');
+            : tt && !racing ? '' : lastArmed ? (tt ? '' : '<span class="armed">ARMED</span>') : '<span class="disarmed">DISARMED</span>');
+        // ?shot=<moment>@<ms> (autolap): freeze on a HUD moment for a screenshot (moments are named in
+        // timetrial.js: title, countdown, set, go, start, g<lap>.<gate>, lap<n>, done).
+        if (shot && tt && tt.moments[shot[0]] != null && now >= tt.moments[shot[0]] + shot[1] && !window.benchResult) {
+            renderer.setAnimationLoop(null); window.benchResult = { shot: shot.join('@'), stage: tt.stage, fps };
+        }
         if (REC) { recLog.frames.push([recT(), axes.throttle, axes.yaw, axes.pitch, axes.roll, armed && !snag.hold ? 1 : 0, physics.droneBody.velocity.length()]); ui.axes = axes; ui._draw(); }
     };
     if (REC) {
@@ -741,7 +791,7 @@ if (mode === 'bench') {
         window.recSpeak = (text) => new Promise((res) => { try { const u = new SpeechSynthesisUtterance(text); u.rate = 1.1; u.onend = u.onerror = () => res(speechSynthesis.getVoices().length); speechSynthesis.speak(u); setTimeout(() => res(-1), 8000); } catch { res(-2); } });
         window.recReady = true;
     } else renderer.setAnimationLoop(() => tick());
-    window.sim = { renderer, scene, camera, physics, input, post, sun, ui, snag };
+    window.sim = { renderer, scene, camera, physics, input, post, sun, ui, snag, tt };
 }
 </script>
 </body>

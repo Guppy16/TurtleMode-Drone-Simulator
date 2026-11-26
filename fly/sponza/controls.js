@@ -32,6 +32,7 @@ export const SETTINGS = [
     ['twr', 'Thrust/weight', 1.6, 5, 0.1, 2.3, ''],
     ['speed', 'Top speed', 3, 20, 0.5, 6.5, 'm/s'],
     ['uptilt', 'Camera uptilt', 0, 50, 1, 15, 'deg'],
+    ['sticks', 'Stick overlay', 0, 1, 1, 0, ''],
 ];
 // Per-axis rate settings: rollCenter, rollMax, rollExpo, pitchCenter, ..., yawExpo.
 export const RATE_FIELDS = [['Center', 'Center', 10, 400, 5, 130], ['Max', 'Max', 100, 1200, 10, 520], ['Expo', 'Expo', 0, 1, 0.05, 0.45]];
@@ -143,21 +144,22 @@ const CSS = `
 #pilot-panel button.kc:hover:not(:disabled) { background: #4c4c4c; } #pilot-panel button.kc:disabled { color: #999; cursor: default; }
 #pilot-panel button.kc.wait { background: var(--acc); color: #1a1400; border-color: var(--acc); }
 #pilot-panel tr.sel td.lab { box-shadow: inset 4px 0 0 #fff; } #pilot-panel td.lab { cursor: pointer; }
-#pilot-cam { position: fixed; left: calc(50% + 145px); bottom: 20px; width: 100px; height: 100px; pointer-events: none;
-  border: 1px solid rgba(255,255,255,.55); border-radius: 3px; background: rgba(8,10,14,.3); color: #fff; font: 700 15px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
-#pilot-cam svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-#pilot-cam .hz { stroke: rgba(255,255,255,.35); stroke-dasharray: 3 3; } #pilot-cam .q { fill: #fff; } #pilot-cam .duct { fill: none; stroke: #fff; stroke-width: 2; }
-#pilot-cam .fov { fill: rgba(255,255,255,.22); } #pilot-cam .ax { stroke: #fff; stroke-width: 1.5; } #pilot-cam .arc { fill: none; stroke: #fff; stroke-width: 1.5; }
-#pilot-cam b { position: absolute; right: 7px; top: 8px; } #pilot-cam small { position: absolute; left: 7px; top: 9px; font: 600 9px/1 system-ui, sans-serif; letter-spacing: .5px; color: rgba(255,255,255,.65); }
-#pilot-cam.hit { border-color: #ffbb00; } #pilot-cam.hit b, #pilot-cam.hit small { color: #ffbb00; } #pilot-cam.hit .ax, #pilot-cam.hit .arc { stroke: #ffbb00; } #pilot-cam.hit .fov { fill: rgba(255,187,0,.3); }
-#pilot-sticks { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); display: flex; gap: 30px; pointer-events: none; }
-#pilot-sticks .gimbal { width: 100px; height: 100px; border: 1px solid rgba(255,255,255,.55); border-radius: 3px; position: relative; background: rgba(8,10,14,.3); }
-#pilot-sticks .gimbal::before, #pilot-sticks .gimbal::after { content: ''; position: absolute; background: rgba(255,255,255,.2); }
-#pilot-sticks .gimbal::before { left: 50%; top: 8px; bottom: 8px; width: 1px; }
-#pilot-sticks .gimbal::after { top: 50%; left: 8px; right: 8px; height: 1px; }
-#pilot-sticks .dot { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: #fff; border: 2px solid rgba(0,0,0,.6); }
-#pilot-status { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); font: 700 18px/1 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; letter-spacing: .08em; text-shadow: 0 1px 4px #000; pointer-events: none; }
-#pilot-status .armed { color: #2fbf6a; } #pilot-status .disarmed { color: #ff5a4a; } #pilot-status .warn { color: #ffb000; }`;
+#pilot-cam { position: fixed; left: calc(40 * var(--hud-u)); bottom: calc(30 * var(--hud-u)); display: flex; align-items: center; gap: calc(8 * var(--hud-u)); pointer-events: none;
+  padding: calc(4 * var(--hud-u)) calc(12 * var(--hud-u)); background: var(--hud-plate); color: var(--hud-text); font-family: var(--hud-font); font-style: var(--hud-style);
+  font-weight: var(--hud-w-light); font-size: calc(20 * var(--hud-u)); line-height: calc(24 * var(--hud-u)); font-variant-numeric: var(--hud-num); }
+#pilot-cam svg { width: calc(26 * var(--hud-u)); height: calc(20 * var(--hud-u)); fill: none; stroke: var(--hud-quiet); stroke-width: 2.4; stroke-linecap: round; overflow: visible; }
+#pilot-cam.hit { color: var(--hud-accent); } #pilot-cam.hit svg { stroke: var(--hud-accent); }
+#pilot-sticks { position: fixed; left: 50%; bottom: calc(26 * var(--hud-u)); transform: translateX(-50%); display: flex; gap: calc(22 * var(--hud-u)); pointer-events: none; }
+#pilot-sticks .gimbal { --b: rgba(255,255,255,.7); width: calc(64 * var(--hud-u)); height: calc(64 * var(--hud-u)); position: relative;
+  background: linear-gradient(var(--b), var(--b)) 0 0 / 10px 2px, linear-gradient(var(--b), var(--b)) 0 0 / 2px 10px, linear-gradient(var(--b), var(--b)) 100% 0 / 10px 2px, linear-gradient(var(--b), var(--b)) 100% 0 / 2px 10px,
+    linear-gradient(var(--b), var(--b)) 0 100% / 10px 2px, linear-gradient(var(--b), var(--b)) 0 100% / 2px 10px, linear-gradient(var(--b), var(--b)) 100% 100% / 10px 2px, linear-gradient(var(--b), var(--b)) 100% 100% / 2px 10px;
+  background-repeat: no-repeat; }
+#pilot-sticks .dot { position: absolute; left: 50%; top: 50%; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; background: var(--hud-text); will-change: transform; }
+#pilot-sticks.off { display: none; }
+#pilot-status { position: fixed; left: 50%; top: calc(100 * var(--hud-u)); transform: translateX(-50%); font-family: var(--hud-font); font-style: var(--hud-style); font-weight: var(--hud-w-regular);
+  font-size: calc(17 * var(--hud-u)); line-height: calc(22 * var(--hud-u)); pointer-events: none; }
+#pilot-status:not(:empty) { background: var(--hud-plate); padding: calc(1 * var(--hud-u)) calc(9 * var(--hud-u)) calc(2 * var(--hud-u)); }
+#pilot-status .armed { color: var(--hud-good); } #pilot-status .disarmed { color: var(--hud-bad); } #pilot-status .warn { color: var(--hud-text); }`;
 
 const KB_KEY = 'tm.keymap.v1';
 // Keyboard bindings by physical key (KeyboardEvent.code). Rows with two slots: menu (Esc fixed, M),
@@ -298,28 +300,22 @@ export class PilotUI {
         s.innerHTML = '<div class="gimbal"><div class="dot"></div></div><div class="gimbal"><div class="dot"></div></div>';
         document.body.append(s);
         this.dots = s.querySelectorAll('.dot');
+        this.sticksEl = s; this._dotsAt = [];
         const cam = document.createElement('div'); cam.id = 'pilot-cam';
-        // Side view of the whoop (two ducts, canopy, camera at the front) with the camera's
-        // view cone drawn at the uptilt above the level line, as sims' camera-angle screens do.
-        cam.innerHTML = '<svg viewBox="0 0 100 100"><line class="hz" x1="52" y1="66" x2="96" y2="66"/>'
-            + '<path class="fov"/><line class="ax" x1="52" y1="66"/><path class="arc"/>'
-            + '<g transform="translate(52 66) scale(1.25) translate(-44 -66)"><rect class="duct" x="8" y="68" width="16" height="7" rx="2"/><rect class="duct" x="30" y="68" width="16" height="7" rx="2"/>'
-            + '<rect class="q" x="8" y="70.5" width="38" height="2"/><path class="q" d="M20 68 L24 61 H36 L40 68 Z"/><rect class="q" x="37" y="62" width="8" height="6" rx="1"/></g>'
-            + '</svg><small>CAM</small><b>0°</b>';
+        // Camera angle, as sims show it in a corner: an angle mark drawn at the uptilt, and the
+        // degrees. No label: the mark says what the number is.
+        cam.innerHTML = '<svg viewBox="0 0 38 30"><path class="base" d="M3 27H35"/><path class="ax"/><path class="arc"/></svg><span></span>';
         document.body.append(cam); this.camEl = cam; this._camUpdate(false);
         this.status = document.createElement('div'); this.status.id = 'pilot-status'; document.body.append(this.status);
     }
 
-    // Camera angle: the view cone at the uptilt; amber for a moment when it changes.
+    // Camera angle: the mark drawn at the uptilt and the degrees; accent colour for a moment when it changes.
     _camUpdate(flash) {
         const t = this.set.uptilt; this._camShown = t;
-        const C = [52, 66], r = (a, L) => [C[0] + L * Math.cos(a * Math.PI / 180), C[1] - L * Math.sin(a * Math.PI / 180)];
-        const f = (p) => p.map((v) => v.toFixed(1)).join(' ');
-        const half = 22; // about half the camera's vertical view
-        this.camEl.querySelector('.fov').setAttribute('d', `M${f(C)} L${f(r(t - half, 44))} A44 44 0 0 0 ${f(r(t + half, 44))} Z`);
-        const e = r(t, 42), ax = this.camEl.querySelector('.ax'); ax.setAttribute('x2', e[0].toFixed(1)); ax.setAttribute('y2', e[1].toFixed(1));
-        this.camEl.querySelector('.arc').setAttribute('d', t > 0.5 ? `M${f(r(0, 26))} A26 26 0 0 0 ${f(r(t, 26))}` : '');
-        this.camEl.querySelector('b').textContent = `${Math.round(t)}°`;
+        const a = t * Math.PI / 180, f = (v) => v.toFixed(1), r = 17;
+        this.camEl.querySelector('.ax').setAttribute('d', `M3 27L${f(3 + 32 * Math.cos(a))} ${f(27 - 32 * Math.sin(a))}`);
+        this.camEl.querySelector('.arc').setAttribute('d', t > 0.5 ? `M${3 + r} 27A${r} ${r} 0 0 0 ${f(3 + r * Math.cos(a))} ${f(27 - r * Math.sin(a))}` : '');
+        this.camEl.querySelector('span').textContent = `${Math.round(t)}°`;
         if (flash) { this.camEl.classList.add('hit'); clearTimeout(this._camT); this._camT = setTimeout(() => this.camEl.classList.remove('hit'), 1200); }
     }
 
@@ -684,9 +680,14 @@ export class PilotUI {
 
     _draw(g) {
         // Mode 2: left = yaw (x) / throttle (y), right = roll (x) / pitch (y, forward = up).
-        const a = this.axes, put = (el, x, y) => { el.style.left = `${50 + x * 44}%`; el.style.top = `${50 - y * 44}%`; };
-        put(this.dots[0], a.yaw, a.throttle * 2 - 1);
-        put(this.dots[1], a.roll, -a.pitch);
+        // Stick dots: off unless the Stick overlay setting is on; moved by transform, on change only.
+        const a = this.axes, show = this.set.sticks >= 1;
+        if (show !== this._sticksOn) { this._sticksOn = show; this.sticksEl.classList.toggle('off', !show); }
+        const put = (i, x, y) => {
+            const w = 64 * 0.44 * Math.min(innerWidth / 1280, innerHeight / 720), tf = `translate(${(x * w).toFixed(1)}px,${(-y * w).toFixed(1)}px)`;
+            if (this._dotsAt[i] !== tf) { this._dotsAt[i] = tf; this.dots[i].style.transform = tf; }
+        };
+        if (show) { put(0, a.yaw, a.throttle * 2 - 1); put(1, a.roll, -a.pitch); }
         if (!this.panel.classList.contains('on')) return;
         if (this.tab === 'rates') this._graph();
         if (this.tab !== 'controller') return;
@@ -714,5 +715,8 @@ export class PilotUI {
         });
     }
 
-    setStatus(html) { this.status.innerHTML = html; }
+    // The key bound to an action, for on-screen hints ('' if none, or if a radio switch does it).
+    keyLabel(id) { if (this.map?.[id]) return ''; const c = this.kb[id]?.find((k) => k); return c ? keyName(c) : ''; }
+
+    setStatus(html) { if (html !== this._status) { this._status = html; this.status.innerHTML = html; } }
 }
