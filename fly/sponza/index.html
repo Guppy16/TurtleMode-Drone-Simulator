@@ -161,7 +161,7 @@ import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
 import { PhysicsEngine } from '../../js/physics.js?v=36';
 import { InputHandler } from '../../js/input.js?v=36';
 import * as CANNON from 'cannon-es';
-import { PilotUI } from './controls.js';
+import { PilotUI, throttleCurve } from './controls.js';
 import { AudioEngine } from '../../js/audio.js?v=36';
 import { RaceManager } from '../../js/race.js?v=36';
 import { formatTime } from '../../js/tracks.js?v=36';
@@ -461,14 +461,37 @@ if (q.get('probes') !== '0') {
 const physics = new PhysicsEngine();
 physics.updateConfig({ mass: 0.032, thrustCurve: 0.5, restitution: 0.3, friction: 0.35 });
 // Flight settings (sliders in the M panel; tiny-whoop defaults in controls.js).
+// Top speed (km/h, as the speed readout shows it) is the level top speed: the props keep biting
+// up to 1.5x that airspeed, and the drag scale is solved so the steady level maximum lands on it.
 function applySettings(st) {
-    physics.updateConfig({ thrust: 0.032 * 9.81 * st.twr, propPitchSpeed: st.speed,
+    const top = st.topSpeed / 3.6;
+    physics.updateConfig({ thrust: 0.032 * 9.81 * st.twr, propPitchSpeed: 1.5 * top,
         rates: { roll: { center: st.rollCenter, max: st.rollMax, expo: st.rollExpo }, pitch: { center: st.pitchCenter, max: st.pitchMax, expo: st.pitchExpo }, yaw: { center: st.yawCenter, max: st.yawMax, expo: st.yawExpo } } });
     if (st.uptilt !== uptilt) { uptilt = st.uptilt; mountCamera?.(); }
+    // Hover throttle: the stick position where the throttle curve gives the hover command.
+    const c = physics.params.thrustCurve, tw = 1 / st.twr;
+    hoverCmd = (-(1 - c) + Math.sqrt((1 - c) ** 2 + 4 * c * tw)) / (2 * c);
+    thr = throttleCurve(st.hover / 100, hoverCmd);
+    if (top !== dragFor) { let lo = 0.02, hi = 50; for (let i = 0; i < 30; i++) { const k = Math.sqrt(lo * hi); (levelTop(k) > top ? lo = k : hi = k); } physics.params.drag = Math.sqrt(lo * hi); dragFor = top; }
 }
-// A ducted whoop is draggy for its size (ducts, guards, a bluff canopy): with TWR 3.4 and a 7.5 m/s
-// prop pitch speed it hovers at ~42% stick, climbs ~0.9 m/s at 50%, punches out at 23 m/s^2 and
-// tops out level near 6.6 m/s, the old top speed (the airframe drag caps it, not prop inflow).
+let dragFor = null, hoverCmd = 0.4, thr = null;
+// Steady level top speed at full throttle for drag scale k, from physics.js's model: thrust with
+// prop inflow loss, body-axis airframe drag and rotor drag, best over the lean angle (the fastest
+// speed at which the thrust still holds the height).
+function levelTop(k) {
+    const P = physics.params, W = P.mass * 9.81, T = P.maxThrust, ps = P.propPitchSpeed, A = physics.dragAreas, q = 0.5 * physics.airDensity * k, kr = physics.rotorDrag * k;
+    let best = 0;
+    for (let deg = 2; deg < 88; deg += 2) {
+        const s = Math.sin(deg * Math.PI / 180), c = Math.cos(deg * Math.PI / 180);
+        const net = (v) => { const F = T * Math.max(0, 1 - v * s / ps), dy = q * v * A.y * v * s, dz = (q * v * A.z + kr) * v * c; return [(F - dy) * s - dz * c, (F - dy) * c + dz * s - W]; };
+        let lo = 0, hi = 80;
+        for (let i = 0; i < 30; i++) { const v = (lo + hi) / 2; (net(v)[0] > 0 ? lo = v : hi = v); }
+        if (lo > best && net(lo)[1] >= 0) best = lo;
+    }
+    return best;
+}
+// A ducted whoop is draggy for its size (ducts, guards, a bluff canopy): these areas set the shape
+// of its drag; the Top speed setting scales it (applySettings). TWR 3.4 punches out at 23 m/s^2.
 physics.dragAreas = { x: 0.0066, y: 0.00875, z: 0.006 };
 physics.rotorDrag = 0.45 * (0.032 / 0.5);
 // Ducts: contact spheres at the four duct centres plus the middle, coplanar with the CoM.
@@ -712,13 +735,24 @@ if (mode === 'thrtest') {
     // Throttle check (mode=thrtest): from a hover-height spawn in the open atrium, hold each
     // throttle level for 2.5 s of sim time (no rendering) and report the vertical speed at the end.
     physics.params.wind.strength = 0;
-    const out = {}, lv = (q.get('thr') || '0.38,0.40,0.42,0.45,0.50,1').split(',').map(Number);
+    const out = {}, lv = (q.get('thr') || '0.15,0.20,0.25,0.30,0.50,1').split(',').map(Number); // stick
     for (const t of lv) {
         physics.setSpawn(0, 4, 0, 0); physics.reset();
-        for (let i = 0; i < 150; i++) { physics.setInputs({ throttle: t, yaw: 0, pitch: 0, roll: 0 }, true); physics.step(1 / 60); }
+        for (let i = 0; i < 150; i++) { physics.setInputs({ throttle: thr.map(t), yaw: 0, pitch: 0, roll: 0 }, true); physics.step(1 / 60); }
         out[t] = +physics.droneBody.velocity.y.toFixed(2);
     }
-    window.benchResult = { mode: 'thrtest', twr: ui.set.twr, speed: ui.set.speed, vy: out };
+    // Level top speed: full throttle at a held lean (nose down about x), high above the building,
+    // 8 s to settle; the top speed is where the steady climb rate crosses zero.
+    const lean = [];
+    for (let deg = 30; deg <= 84; deg += 3) {
+        physics.setSpawn(0, 60, 0, 0); physics.reset();
+        const qd = new CANNON.Quaternion(); qd.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -deg * Math.PI / 180);
+        for (let i = 0; i < 480; i++) { const b = physics.droneBody; b.quaternion.copy(qd); b.angularVelocity.set(0, 0, 0); physics.setInputs({ throttle: 1, yaw: 0, pitch: 0, roll: 0 }, true); physics.step(1 / 60); }
+        const v = physics.droneBody.velocity; lean.push([deg, +Math.hypot(v.x, v.z).toFixed(2), +v.y.toFixed(2)]);
+    }
+    let levelTopMs = null;
+    for (let i = 1; i < lean.length; i++) if (lean[i - 1][2] >= 0 && lean[i][2] < 0) { const f = lean[i - 1][2] / (lean[i - 1][2] - lean[i][2]); levelTopMs = +(lean[i - 1][1] + f * (lean[i][1] - lean[i - 1][1])).toFixed(2); }
+    window.benchResult = { mode: 'thrtest', hoverStick: ui.set.hover, hoverCmd: +hoverCmd.toFixed(3), levelTopKmh: levelTopMs && +(levelTopMs * 3.6).toFixed(1), model: +(levelTop(physics.params.drag) * 3.6).toFixed(1), lean, twr: ui.set.twr, topSpeed: ui.set.topSpeed, drag: +physics.params.drag.toFixed(3), vy: out };
 } else if (mode === 'bench') {
     // Scripted: a fixed camera path round the atrium (no physics), to time rendering only.
     const N = Number(q.get('frames') || 240);
@@ -756,7 +790,7 @@ if (mode === 'thrtest') {
     const shot = autolap && q.get('shot') ? [q.get('shot').split('@')[0], Number(q.get('shot').split('@')[1] || 0)] : null;
     const auto = mode === 'flytest', track = []; let contacts = 0; const autoT0 = performance.now(); simNow = autoT0;
     // Hover throttle for this airframe, from the thrust curve (thrust = T * mix(t, t^2, curve)).
-    const hoverT = (() => { const tw = 1 / ui.set.twr, c = physics.params.thrustCurve; let lo = 0, hi = 1; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; ((1 - c) * m + c * m * m < tw) ? lo = m : hi = m; } return lo; })();
+    const hoverT = thr.inv(hoverCmd); // hover stick
     // Shader warm-up: WebGPU builds a pipeline the first time each material is drawn, which stalls
     // a frame or two - felt as stutter when new parts of the building swing into view. Draw one
     // frame with nothing culled so everything is built before flight.
@@ -822,7 +856,7 @@ if (mode === 'thrtest') {
             const t = (now - autoT0) / 1000;
             armed = t > 1.0;
             if (!tt || tt.stage === 'idle' || tt.stage === 'countdown') axes = { throttle: 0, yaw: 0, pitch: 0, roll: 0 };
-            else { const a = autolap.update(dt); axes = a; autolap.maxErr = Math.max(autolap.maxErr || 0, a.err); }
+            else { const a = autolap.update(dt); axes = { ...a, throttle: thr.inv(a.throttle) }; autolap.maxErr = Math.max(autolap.maxErr || 0, a.err); }
             if (physics._inContact && t > 1 && tt?.stage === 'racing') contacts++;
             if (tt?.stage === 'racing' && now - autolap.lastNow > 25) autolap.long = (autolap.long || 0) + 1;
             if (tt?.stage === 'racing') { autolap.rT0 ??= now; autolap.rN = (autolap.rN || 0) + 1; autolap.rT1 = now; }
@@ -838,7 +872,7 @@ if (mode === 'thrtest') {
             const t = (now - autoT0) / 1000;
             armed = t > 0.3;
             const climb = Number(q.get('climb') || 1.2);
-            axes = { throttle: t < climb ? 0.75 : t < 2.5 ? hoverT : hoverT + 0.06, yaw: 0, pitch: t > 2.5 ? -0.18 : 0, roll: 0 };
+            axes = { throttle: t < climb ? thr.inv(0.75) : t < 2.5 ? hoverT : thr.inv(hoverCmd + 0.06), yaw: 0, pitch: t > 2.5 ? -0.18 : 0, roll: 0 };
             const p = physics.droneBody.position;
             track.push([+t.toFixed(2), +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)]);
             if (physics._inContact) contacts++;
@@ -854,6 +888,8 @@ if (mode === 'thrtest') {
         }
         // Arm changes are toasts; disarmed mid-run also stays up as a status (below).
         if (armed !== lastArmed && !(!armed && (tt?.stage === 'go' || tt?.stage === 'racing'))) toast(armed ? 'Armed' : 'Disarmed');
+        const stick = axes;
+        axes = { ...axes, throttle: thr.map(axes.throttle) }; // throttle curve: stick -> motor command
         physics.setInputs(axes, armed); lastArmed = armed;
         physics.step(dt);
         updateSnag(dt, now);
@@ -887,7 +923,7 @@ if (mode === 'thrtest') {
                 renderer.setAnimationLoop(null); window.benchResult = { shot: shot.join('@'), stage: tt.stage, fps };
             }
         }
-        if (REC) { recLog.frames.push([recT(), axes.throttle, axes.yaw, axes.pitch, axes.roll, armed && !snag.hold ? 1 : 0, physics.droneBody.velocity.length()]); ui.axes = axes; ui._draw(); }
+        if (REC) { recLog.frames.push([recT(), axes.throttle, axes.yaw, axes.pitch, axes.roll, armed && !snag.hold ? 1 : 0, physics.droneBody.velocity.length()]); ui.axes = stick; ui._draw(); }
     };
     // fps (twice a second, top right) and speed (10 Hz, bottom left), written only on change.
     function drawReadouts(real) {

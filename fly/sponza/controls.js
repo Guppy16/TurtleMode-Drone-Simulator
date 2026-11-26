@@ -26,11 +26,29 @@ export function rateAt(x, { center, max, expo }) {
     return (center * e) / (1 - a * sr);
 }
 
+// Throttle curve, like Betaflight's thr_mid or an EdgeTX curve: stick 0 -> 0, stick `hs` (the
+// Hover throttle setting) -> `hp` (the command that hovers the airframe), 1 -> 1. A monotone cubic
+// through the three points (Fritsch-Butland slopes): smooth, no kink, never runs backwards. It
+// keeps the physics' thrust-to-weight real while hover sits low on the stick, with most of the
+// stick above it. inv() is its inverse (the autopilot thinks in motor commands).
+export function throttleCurve(hs, hp) {
+    const d0 = hp / hs, d1 = (1 - hp) / (1 - hs), m1 = 2 * d0 * d1 / (d0 + d1);
+    const m0 = Math.max(0, (3 * d0 - m1) / 2), m2 = Math.max(0, (3 * d1 - m1) / 2);
+    const herm = (x, x0, x1, y0, y1, s0, s1) => {
+        const h = x1 - x0, t = (x - x0) / h, t2 = t * t, t3 = t2 * t;
+        return (2 * t3 - 3 * t2 + 1) * y0 + (t3 - 2 * t2 + t) * h * s0 + (-2 * t3 + 3 * t2) * y1 + (t3 - t2) * h * s1;
+    };
+    const map = (s) => { s = Math.min(1, Math.max(0, s)); return s <= hs ? herm(s, 0, hs, 0, hp, m0, m1) : herm(s, hs, 1, hp, 1, m1, m2); };
+    const inv = (y) => { let lo = 0, hi = 1; for (let i = 0; i < 30; i++) { const m = (lo + hi) / 2; (map(m) < y ? lo = m : hi = m); } return (lo + hi) / 2; };
+    return { map, inv };
+}
+
 // Flight settings with tiny-whoop defaults (1S, 65 mm, ducted, ~32 g).
 export const SETTINGS = [
     // key, label, min, max, step, default, unit
     ['twr', 'Thrust/weight', 1.6, 5, 0.1, 3.4, ''],
-    ['speed', 'Top speed', 3, 20, 0.5, 7.5, 'm/s'],
+    ['topSpeed', 'Top speed', 15, 80, 1, 36, 'km/h'],
+    ['hover', 'Hover throttle', 10, 60, 1, 20, '%'],
     ['uptilt', 'Camera uptilt', 0, 50, 1, 15, 'deg'],
     ['sticks', 'Stick overlay', 0, 1, 1, 0, ''],
 ];
@@ -59,12 +77,12 @@ function loadSettings() {
     }
     if (saved.rate !== undefined) set.rollMax = set.pitchMax = saved.rate;
     if (saved.yawRate !== undefined) set.yawMax = saved.yawRate;
-    // Earlier defaults (TWR 2.8, 10 m/s) were too quick indoors; move them over if never changed.
-    if (saved.twr === 2.8) delete saved.twr;
-    if (saved.speed === 10) delete saved.speed;
-    // TWR 2.3 at 6.5 m/s hovered at 56% stick and needed ~75% to lift off; now 3.4, 7.5 m/s.
-    if (saved.twr === 2.3) delete saved.twr;
-    if (saved.speed === 6.5) delete saved.speed;
+    // Earlier TWR defaults (2.8, then 2.3, which needed ~75% stick to lift off) move over if never
+    // changed.
+    if (saved.twr === 2.8 || saved.twr === 2.3) delete saved.twr;
+    // 'speed' was the prop pitch speed in m/s; the Top speed setting is now 'topSpeed', the level top
+    // speed in km/h, so the old value no longer applies.
+    delete saved.speed;
     for (const [axis] of AXES) if (RATE_FIELDS.every(([f], i) => saved[rk(axis, f)] === RATE_OLD[axis][i])) RATE_FIELDS.forEach(([f]) => delete saved[rk(axis, f)]);
     for (const k of Object.keys(set)) if (typeof saved[k] === 'number' && Number.isFinite(saved[k])) set[k] = saved[k];
     return set;
@@ -541,7 +559,8 @@ export class PilotUI {
             l.innerHTML = `<span>${label}</span><input type="range" min="${min}" max="${max}" step="${step}"><input type="number" min="${min}" max="${max}" step="${step}"><span class="u">${unit}</span>`;
             const [rng, num] = l.querySelectorAll('input');
             if (k === 'uptilt') l.title = 'Also changes with the up and down arrow keys';
-            if (k === 'speed') l.title = 'Prop pitch speed: the airspeed where thrust fades out';
+            if (k === 'hover') l.title = 'Stick position that hovers (the throttle curve passes the hover command there)';
+            if (k === 'topSpeed') l.title = 'Level top speed at full throttle, as the speed readout shows it';
             const show = () => { rng.value = num.value = this.set[k]; rng.style.setProperty('--p', `${(this.set[k] - min) / (max - min) * 100}%`); };
             rng.oninput = () => { this.set[k] = Number(rng.value); show(); this._saveSet(); this._derived(); };
             num.oninput = () => { const v = parseFloat(num.value); if (!Number.isFinite(v)) return; this.set[k] = clamp(v, min, max); rng.value = this.set[k]; rng.style.setProperty('--p', `${(this.set[k] - min) / (max - min) * 100}%`); this._saveSet(); this._derived(); };

@@ -73,8 +73,9 @@ export class Autopilot {
         const aff = vAhead.sub(vWant).divideScalar(Math.max(0.05, (Math.max(0.15, vr * 0.15)) / Math.max(vr, 0.5)));
         const ep = pr.clone().sub(pos), ev = vWant.clone().sub(vel);
         const acc = aff.addScaledVector(ep, 9).addScaledVector(ev, 4.5);
-        // Air drag, roughly: the props have to push against it too.
-        acc.addScaledVector(vel, 0.9);
+        // Air drag, roughly (rotor drag near hover RPM, which dominates at these speeds): the
+        // props have to push against it too. Follows the physics' drag scale (Top speed setting).
+        acc.addScaledVector(vel, ph.rotorDrag * P.drag * 0.65 / P.mass);
         if (acc.length() > 14) acc.setLength(14);
         const F = acc.clone().add(new THREE.Vector3(0, G, 0));
         // Lean limit 55 deg.
