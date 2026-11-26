@@ -393,7 +393,10 @@ function applySettings(st) {
         rates: { roll: { center: st.rollCenter, max: st.rollMax, expo: st.rollExpo }, pitch: { center: st.pitchCenter, max: st.pitchMax, expo: st.pitchExpo }, yaw: { center: st.yawCenter, max: st.yawMax, expo: st.yawExpo } } });
     if (st.uptilt !== uptilt) { uptilt = st.uptilt; mountCamera?.(); }
 }
-physics.dragAreas = { x: 0.0011, y: 0.0035, z: 0.001 };
+// A ducted whoop is draggy for its size (ducts, guards, a bluff canopy): with TWR 3.4 and a 7.5 m/s
+// prop pitch speed it hovers at ~42% stick, climbs ~0.9 m/s at 50%, punches out at 23 m/s^2 and
+// tops out level near 6.6 m/s, the old top speed (the airframe drag caps it, not prop inflow).
+physics.dragAreas = { x: 0.0066, y: 0.00875, z: 0.006 };
 physics.rotorDrag = 0.45 * (0.032 / 0.5);
 // Ducts: contact spheres at the four duct centres plus the middle, coplanar with the CoM.
 const a = 0.032, r = 0.024;

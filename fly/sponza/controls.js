@@ -29,16 +29,21 @@ export function rateAt(x, { center, max, expo }) {
 // Flight settings with tiny-whoop defaults (1S, 65 mm, ducted, ~32 g).
 export const SETTINGS = [
     // key, label, min, max, step, default, unit
-    ['twr', 'Thrust/weight', 1.6, 5, 0.1, 2.3, ''],
-    ['speed', 'Top speed', 3, 20, 0.5, 6.5, 'm/s'],
+    ['twr', 'Thrust/weight', 1.6, 5, 0.1, 3.4, ''],
+    ['speed', 'Top speed', 3, 20, 0.5, 7.5, 'm/s'],
     ['uptilt', 'Camera uptilt', 0, 50, 1, 15, 'deg'],
     ['sticks', 'Stick overlay', 0, 1, 1, 0, ''],
 ];
 // Per-axis rate settings: rollCenter, rollMax, rollExpo, pitchCenter, ..., yawExpo.
-export const RATE_FIELDS = [['Center', 'Center', 10, 400, 5, 130], ['Max', 'Max', 100, 1200, 10, 520], ['Expo', 'Expo', 0, 1, 0.05, 0.45]];
+export const RATE_FIELDS = [['Center', 'Center', 10, 400, 5, 70], ['Max', 'Max', 100, 1200, 10, 450], ['Expo', 'Expo', 0, 1, 0.05, 0.3]];
 const rk = (axis, f) => axis + f; // 'roll' + 'Center'
+// Default Actual rates, soft enough to react with indoors: roll and pitch 70 deg/s centre, 450 max,
+// expo 0.3; yaw 60 / 300 / 0.2.
 const RATE_DEFAULTS = {};
-for (const [axis] of AXES) for (const [f, , , , , d] of RATE_FIELDS) RATE_DEFAULTS[rk(axis, f)] = axis === 'yaw' && f === 'Max' ? 380 : d;
+const RATE_DEF = { roll: [70, 450, 0.3], pitch: [70, 450, 0.3], yaw: [60, 300, 0.2] };
+for (const [axis] of AXES) RATE_FIELDS.forEach(([f], i) => (RATE_DEFAULTS[rk(axis, f)] = RATE_DEF[axis][i]));
+// The previous defaults: an axis still on them moves to the new ones; customised axes are kept.
+const RATE_OLD = { roll: [130, 520, 0.45], pitch: [130, 520, 0.45], yaw: [130, 380, 0.45] };
 export const rates = (set) => Object.fromEntries(AXES.map(([axis]) => [axis, { center: set[rk(axis, 'Center')], max: set[rk(axis, 'Max')], expo: set[rk(axis, 'Expo')] }]));
 
 // Settings saved before the per-axis rates: rate (roll and pitch max), yawRate, center, expo.
@@ -57,6 +62,10 @@ function loadSettings() {
     // Earlier defaults (TWR 2.8, 10 m/s) were too quick indoors; move them over if never changed.
     if (saved.twr === 2.8) delete saved.twr;
     if (saved.speed === 10) delete saved.speed;
+    // TWR 2.3 at 6.5 m/s hovered at 56% stick and needed ~75% to lift off; now 3.4, 7.5 m/s.
+    if (saved.twr === 2.3) delete saved.twr;
+    if (saved.speed === 6.5) delete saved.speed;
+    for (const [axis] of AXES) if (RATE_FIELDS.every(([f], i) => saved[rk(axis, f)] === RATE_OLD[axis][i])) RATE_FIELDS.forEach(([f]) => delete saved[rk(axis, f)]);
     for (const k of Object.keys(set)) if (typeof saved[k] === 'number' && Number.isFinite(saved[k])) set[k] = saved[k];
     return set;
 }
