@@ -149,12 +149,12 @@ const CSS = `
   font-weight: var(--hud-w-light); font-size: calc(20 * var(--hud-u)); line-height: calc(24 * var(--hud-u)); font-variant-numeric: var(--hud-num); }
 #pilot-cam svg { width: calc(26 * var(--hud-u)); height: calc(20 * var(--hud-u)); fill: none; stroke: var(--hud-quiet); stroke-width: 2.4; stroke-linecap: round; overflow: visible; }
 #pilot-cam.hit { color: var(--hud-accent); } #pilot-cam.hit svg { stroke: var(--hud-accent); }
-#pilot-sticks { position: fixed; left: 50%; bottom: calc(26 * var(--hud-u)); transform: translateX(-50%); display: flex; gap: calc(22 * var(--hud-u)); pointer-events: none; }
-#pilot-sticks .gimbal { --b: rgba(255,255,255,.7); width: calc(64 * var(--hud-u)); height: calc(64 * var(--hud-u)); position: relative;
-  background: linear-gradient(var(--b), var(--b)) 0 0 / 10px 2px, linear-gradient(var(--b), var(--b)) 0 0 / 2px 10px, linear-gradient(var(--b), var(--b)) 100% 0 / 10px 2px, linear-gradient(var(--b), var(--b)) 100% 0 / 2px 10px,
-    linear-gradient(var(--b), var(--b)) 0 100% / 10px 2px, linear-gradient(var(--b), var(--b)) 0 100% / 2px 10px, linear-gradient(var(--b), var(--b)) 100% 100% / 10px 2px, linear-gradient(var(--b), var(--b)) 100% 100% / 2px 10px;
-  background-repeat: no-repeat; }
-#pilot-sticks .dot { position: absolute; left: 50%; top: 50%; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; background: var(--hud-text); will-change: transform; }
+#pilot-sticks { position: fixed; left: 50%; bottom: calc(30 * var(--hud-u)); transform: translateX(-50%); display: flex; gap: calc(14 * var(--hud-u)); pointer-events: none; }
+#pilot-sticks .gimbal { position: relative; width: calc(56 * var(--hud-u)); height: calc(56 * var(--hud-u)); box-sizing: border-box; background: var(--hud-plate-soft); border: 1px solid var(--hud-quiet); }
+#pilot-sticks .gimbal::before, #pilot-sticks .gimbal::after { content: ''; position: absolute; background: var(--hud-cross); }
+#pilot-sticks .gimbal::before { left: 50%; top: 18%; bottom: 18%; width: 1px; }
+#pilot-sticks .gimbal::after { top: 50%; left: 18%; right: 18%; height: 1px; }
+#pilot-sticks .dot { position: absolute; left: 50%; top: 50%; width: calc(8 * var(--hud-u)); height: calc(8 * var(--hud-u)); margin: calc(-4 * var(--hud-u)) 0 0 calc(-4 * var(--hud-u)); border-radius: 50%; background: var(--hud-text); will-change: transform; }
 #pilot-sticks.off { display: none; }
 #pilot-status { position: fixed; left: 50%; top: calc(100 * var(--hud-u)); transform: translateX(-50%); font-family: var(--hud-font); font-style: var(--hud-style); font-weight: var(--hud-w-regular);
   font-size: calc(17 * var(--hud-u)); line-height: calc(22 * var(--hud-u)); pointer-events: none; }
@@ -680,11 +680,12 @@ export class PilotUI {
 
     _draw(g) {
         // Mode 2: left = yaw (x) / throttle (y), right = roll (x) / pitch (y, forward = up).
-        // Stick dots: off unless the Stick overlay setting is on; moved by transform, on change only.
+        // Stick gimbals (mode 2: left throttle/yaw, right pitch/roll): a dot in each box, off unless
+        // the Stick overlay setting is on; moved by transform, on change only.
         const a = this.axes, show = this.set.sticks >= 1;
         if (show !== this._sticksOn) { this._sticksOn = show; this.sticksEl.classList.toggle('off', !show); }
         const put = (i, x, y) => {
-            const w = 64 * 0.44 * Math.min(innerWidth / 1280, innerHeight / 720), tf = `translate(${(x * w).toFixed(1)}px,${(-y * w).toFixed(1)}px)`;
+            const w = 22 * Math.min(innerWidth / 1280, innerHeight / 720), tf = `translate(${(x * w).toFixed(1)}px,${(-y * w).toFixed(1)}px)`;
             if (this._dotsAt[i] !== tf) { this._dotsAt[i] = tf; this.dots[i].style.transform = tf; }
         };
         if (show) { put(0, a.yaw, a.throttle * 2 - 1); put(1, a.roll, -a.pitch); }
