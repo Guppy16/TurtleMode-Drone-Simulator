@@ -648,7 +648,18 @@ let simNow = last;
 let spdT = 0, spdTxt = '';
 const frameTimes = [], gpuTimes = [];
 const mode = q.get('mode') || 'fly';
-if (mode === 'bench') {
+if (mode === 'thrtest') {
+    // Throttle check (mode=thrtest): from a hover-height spawn in the open atrium, hold each
+    // throttle level for 2.5 s of sim time (no rendering) and report the vertical speed at the end.
+    physics.params.wind.strength = 0;
+    const out = {}, lv = (q.get('thr') || '0.38,0.40,0.42,0.45,0.50,1').split(',').map(Number);
+    for (const t of lv) {
+        physics.setSpawn(0, 4, 0, 0); physics.reset();
+        for (let i = 0; i < 150; i++) { physics.setInputs({ throttle: t, yaw: 0, pitch: 0, roll: 0 }, true); physics.step(1 / 60); }
+        out[t] = +physics.droneBody.velocity.y.toFixed(2);
+    }
+    window.benchResult = { mode: 'thrtest', twr: ui.set.twr, speed: ui.set.speed, vy: out };
+} else if (mode === 'bench') {
     // Scripted: a fixed camera path round the atrium (no physics), to time rendering only.
     const N = Number(q.get('frames') || 240);
     const phase = Number(q.get('phase') || 0);
@@ -676,10 +687,12 @@ if (mode === 'bench') {
     const autolap = mode === 'autolap' && tt ? new Autopilot({ physics, gates: withFacing(SPONZA_TRACK.gates), normalOf: (g) => race.gates[SPONZA_TRACK.gates.findIndex((x) => x.name === g.name)].normal,
         vmax: Number(q.get('vmax') || 3.6) }) : null;
     if (autolap && q.get('rec') !== 'offline') startAudio();
-    if (autolap && q.get('rec')) hud.style.display = 'none';
+    if (autolap && q.get('rec') === 'offline') hud.style.display = 'none';
     // Clean plates for UI mockups: no HTML overlays (nohud=1), no path line (nopath=1).
     if (q.get('nohud') === '1') { const st = document.createElement('style'); st.textContent = '#hud,#spd,#toast,#msg,#tt,#tt-arrow,#pilot-sticks,#pilot-cam,#pilot-status{display:none!important}'; document.head.appendChild(st); }
     if (q.get('nopath') === '1' && tt) tt._path = () => {};
+    const shotUi = (q.get('shotui') || '').split(',');
+    if (shotUi.includes('sticks')) ui.set.sticks = 1;
     const shot = autolap && q.get('shot') ? [q.get('shot').split('@')[0], Number(q.get('shot').split('@')[1] || 0)] : null;
     const auto = mode === 'flytest', track = []; let contacts = 0; const autoT0 = performance.now(); simNow = autoT0;
     // Hover throttle for this airframe, from the thrust curve (thrust = T * mix(t, t^2, curve)).
@@ -707,7 +720,20 @@ if (mode === 'bench') {
         for (const k of ['_tone', '_blip', '_buzz']) tt[k] = (...a) => recLog.sfx.push([recT(), k, a]);
         window.ttSay = (text) => recLog.speech.push([recT(), text]);
     }
-    let wasPaused = false;
+    let wasPaused = false, pausedDrawn = 0;
+    // Frame pacing (autolap): every frame's interval and the browser's long tasks (main thread
+    // busy over 50 ms), each matched to the nearest HUD moment (gate pass, lap, ...).
+    const pace = autolap ? { f: [], lt: [] } : null;
+    if (pace) try { new PerformanceObserver((l) => { for (const e of l.getEntries()) pace.lt.push([e.startTime, e.duration]); }).observe({ type: 'longtask', buffered: true }); } catch { /* unsupported */ }
+    const paceReport = () => {
+        const f = pace.f, iv = f.slice(1).map((x, i) => x[0] - f[i][0]).sort((a, b) => a - b), pc = (p) => +iv[Math.min(iv.length - 1, Math.floor(iv.length * p))].toFixed(1);
+        const simAt = (r) => { let lo = 0, hi = f.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; (f[m][0] < r) ? lo = m : hi = m; } return f[lo][1] + (r - f[lo][0]); };
+        const near = (sim) => { let best = null; for (const [k, v] of Object.entries(tt?.moments || {})) { const d = sim - v; if (best === null || Math.abs(d) < Math.abs(best[1])) best = [k, Math.round(d)]; } return best && `${best[0]}${best[1] >= 0 ? '+' : ''}${best[1]}ms`; };
+        const slow = f.slice(1).map((x, i) => [x[0] - f[i][0], x[0]]).filter(([d]) => d > 25);
+        return { frames: iv.length, p50: pc(0.5), p95: pc(0.95), p99: pc(0.99), over25: slow.length,
+            slow: slow.slice(0, 40).map(([d, r]) => [Math.round(d), +((r - autoT0) / 1000).toFixed(2), near(simAt(r))]),
+            longTasks: pace.lt.filter(([t]) => t > f[0][0]).map(([t, d]) => [Math.round(d), +((t - autoT0) / 1000).toFixed(2), near(simAt(t))]) };
+    };
     const tick = (vnow) => {
         const real = vnow ?? performance.now();
         let dt = REC ? 1 / 60 : Math.min((real - last) / 1000, 0.1);
@@ -722,9 +748,13 @@ if (mode === 'bench') {
             try { paused ? speechSynthesis.pause() : speechSynthesis.resume(); } catch { /* no speech */ }
             if (!paused) dt = Math.min(dt, 1 / 60);
         }
-        if (paused) { draw(); frames++; drawReadouts(real); return; }
+        // Paused, the scene is drawn once and then left (the canvas keeps the frame), so the menu
+        // costs no rendering.
+        if (paused) { if (!pausedDrawn || innerWidth !== pausedDrawn) { draw(); pausedDrawn = innerWidth; } drawReadouts(real); return; }
+        pausedDrawn = 0;
         simNow += dt * 1000;
         const now = simNow;
+        if (pace && !window.benchResult && tt?.stage !== 'idle') pace.f.push([real, now]);
         if (snag.hold || tt?.holding) axes = { ...axes, throttle: 0 };
         if (autolap) {
             // Demo flight (mode=autolap): arm, wait out the countdown, then the autopilot flies
@@ -740,7 +770,7 @@ if (mode === 'bench') {
             if (tt?.stage === 'done') autolap.doneAt ??= t;
             if (!window.benchResult && (autolap.doneAt && t > autolap.doneAt + 3 || t > Number(q.get('tEnd') || 120))) {
                 window.benchResult = { mode: 'autolap', stage: tt?.stage, laps: tt?.lapTimes, holeshot: tt?.holeshot, maxErr: +(autolap.maxErr || 0).toFixed(2), contactFrames: contacts, snags: snagCount, t: +t.toFixed(1), fps, longFrames: autolap.long || 0, racingFps: autolap.rN > 1 ? +((autolap.rN - 1) * 1000 / (autolap.rT1 - autolap.rT0)).toFixed(1) : null,
-                    hudMs: autolap.hudN ? +(autolap.hudMs / autolap.hudN).toFixed(3) : null, hudMaxMs: +(autolap.hudMax || 0).toFixed(2) };
+                    hudMs: autolap.hudN ? +(autolap.hudMs / autolap.hudN).toFixed(3) : null, hudMaxMs: +(autolap.hudMax || 0).toFixed(2), pace: paceReport() };
             }
         }
         if (auto) {
@@ -787,8 +817,15 @@ if (mode === 'bench') {
         ui.setStatus(snag.hold ? '<span class="warn">Tangled in cloth</span>' : racing && !lastArmed ? '<span class="disarmed">Disarmed</span>' : '');
         // ?shot=<moment>@<ms> (autolap): freeze on a HUD moment for a screenshot (moments are named in
         // timetrial.js: title, countdown, go, start, g<lap>.<gate>, lap<n>, done).
-        if (shot && tt && tt.moments[shot[0]] != null && now >= tt.moments[shot[0]] + shot[1] && !window.benchResult) {
-            renderer.setAnimationLoop(null); window.benchResult = { shot: shot.join('@'), stage: tt.stage, fps };
+        // &shotui=sticks,recover,menu adds the stick overlay, a recover 0.4 s before the shot (its
+        // toast), or the open menu (paused) to the shot.
+        if (shot && tt && tt.moments[shot[0]] != null && !window.benchResult) {
+            const at = tt.moments[shot[0]] + shot[1];
+            if (shotUi.includes('recover') && now >= at - 400 && !shot.recovered) { shot.recovered = true; recoverDrone(); }
+            if (now >= at) {
+                if (shotUi.includes('menu')) ui._toggle();
+                renderer.setAnimationLoop(null); window.benchResult = { shot: shot.join('@'), stage: tt.stage, fps };
+            }
         }
         if (REC) { recLog.frames.push([recT(), axes.throttle, axes.yaw, axes.pitch, axes.roll, armed && !snag.hold ? 1 : 0, physics.droneBody.velocity.length()]); ui.axes = axes; ui._draw(); }
     };
