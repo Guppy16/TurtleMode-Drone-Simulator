@@ -692,7 +692,9 @@ export class PilotUI {
         };
         if (show) { put(0, a.yaw, a.throttle * 2 - 1); put(1, a.roll, -a.pitch); }
         if (!this.panel.classList.contains('on')) return;
-        if (this.tab === 'rates') this._graph();
+        // The rates graph shows the live sticks: redraw only when they move (settings changes
+        // redraw it directly).
+        if (this.tab === 'rates') { const k = `${a.roll.toFixed(2)},${a.pitch.toFixed(2)},${a.yaw.toFixed(2)}`; if (k !== this._graphAt) { this._graphAt = k; this._graph(); } }
         if (this.tab !== 'controller') return;
         const m = this.map || {};
         const setCh = (k, us, frac) => {
