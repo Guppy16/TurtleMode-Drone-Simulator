@@ -44,9 +44,9 @@ const say = (text) => {
 const READY_MS = 1000; // "Ready" before "Go"
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
 const ease = (x) => 1 - (1 - x) * (1 - x);
-// Deltas: at most two significant figures (-0.18, +0.4, -1.2, +12), a true minus sign, green
+// Deltas: at most two significant figures and two decimals (+0.01, -0.18, +0.4, -1.2, +12), a true minus sign, green
 // when faster; judged on the value shown, so 0 is neither.
-const deltaVal = (d) => (d === 0 ? 0 : Math.sign(d) * Number((Math.abs(Math.round(d)) / 1000).toPrecision(2)));
+const deltaVal = (d) => (d === 0 ? 0 : Math.sign(d) * Math.round(Number((Math.abs(Math.round(d)) / 1000).toPrecision(2)) * 100) / 100);
 const deltaText = (d) => { const v = deltaVal(d); return `${v < 0 ? '−' : v > 0 ? '+' : ''}${Math.abs(v)}`; };
 const deltaCls = (d) => { const v = deltaVal(d); return v < 0 ? 'good' : v > 0 ? 'bad' : ''; };
 
@@ -101,38 +101,56 @@ const CSS = `
   font-weight: var(--hud-w-regular); font-variant-numeric: var(--hud-num); line-height: 1; }
 #tt > div { position: absolute; visibility: hidden; }
 #tt .on { visibility: visible; }
-#tt .pl { background: var(--hud-plate); white-space: nowrap; }
+/* Plate-less by default (shadowed type); plates only on the clock + delta and the lap result. */
+#tt .pl { white-space: nowrap; text-shadow: var(--hud-shadow); }
+#tt .good, #tt .bad { text-shadow: var(--hud-shadow-strong); } #tt .lap .good, #tt .lap .bad, #tt .delta .pl { text-shadow: none; }
 #tt .q { color: var(--hud-quiet); }
 #tt .lt { font-weight: var(--hud-w-light); }
 #tt .good { color: var(--hud-good); } #tt .bad { color: var(--hud-bad); }
 #tt .mid { left: 0; right: 0; text-align: center; }
 #tt .mid > .pl { display: inline-block; }
-#tt .clock { top: calc(18 * var(--hud-u)); }
-#tt .clock > .pl { padding: calc(3 * var(--hud-u)) calc(16 * var(--hud-u)) calc(4 * var(--hud-u)); font-size: calc(26 * var(--hud-u)); line-height: calc(32 * var(--hud-u)); contain: layout paint; }
-#tt .delta { top: calc(61 * var(--hud-u)); will-change: opacity; }
-#tt .delta > .pl { padding: calc(1 * var(--hud-u)) calc(9 * var(--hud-u)) calc(2 * var(--hud-u)); font-size: calc(17 * var(--hud-u)); line-height: calc(22 * var(--hud-u)); }
-#tt .dist { left: 0; top: 0; padding: 0 calc(6 * var(--hud-u)); font-size: calc(14 * var(--hud-u)); line-height: calc(20 * var(--hud-u)); font-weight: var(--hud-w-light); will-change: transform; }
-#tt .title { left: calc(48 * var(--hud-u)); top: calc(40 * var(--hud-u)); padding: calc(20 * var(--hud-u)) calc(24 * var(--hud-u)) calc(22 * var(--hud-u)); }
+/* Clock + delta: one plate in two rows; the clock's first digit on the timing column (--hud-col),
+   so the clock sits centred; the delta row joins under it, divided by a sage hairline. */
+#tt .clock { left: var(--hud-col); top: calc(24 * var(--hud-u)); margin-left: calc(-14 * var(--hud-u)); display: flex; flex-direction: column; width: max-content; }
+#tt .clock .pl, #tt .lap > .pl { background: var(--hud-plate); text-shadow: none; padding: 0 calc(14 * var(--hud-u)); }
+#tt .clock .pl { display: flex; align-items: center; border-radius: var(--hud-r); }
+#tt .clock > .pl { height: calc(44 * var(--hud-u)); font-size: calc(32 * var(--hud-u)); contain: layout paint; }
+#tt .clock.wd > .pl { border-radius: var(--hud-r) var(--hud-r) 0 0; }
+#tt .delta { visibility: hidden; will-change: opacity; } #tt .delta.on { visibility: visible; }
+#tt .delta > .pl { box-sizing: border-box; height: calc(28 * var(--hud-u)); font-size: calc(18 * var(--hud-u)); border-top: 1px solid var(--hud-div); border-radius: 0 0 var(--hud-r) var(--hud-r); }
+#tt .dist { left: 0; top: 0; padding: 0 calc(6 * var(--hud-u)); font-size: calc(16 * var(--hud-u)); line-height: calc(20 * var(--hud-u)); font-weight: var(--hud-w-regular); will-change: transform; }
+/* Title card: no plate, one left edge, the type carried by a soft shadow. */
+#tt .title { left: calc(56 * var(--hud-u)); top: calc(48 * var(--hud-u)); text-shadow: var(--hud-title-shadow); }
+#tt .title > * { display: block; margin: 0; }
+#tt .title .badge { height: calc(44 * var(--hud-u)); width: auto; margin-left: calc(-4 * var(--hud-u)); filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
+#tt .title .nm { margin-top: calc(14 * var(--hud-u)); font-size: calc(32 * var(--hud-u)); line-height: calc(36 * var(--hud-u)); }
 #tt .hd { display: flex; align-items: center; gap: calc(12 * var(--hud-u)); }
-#tt .hd img { width: calc(40 * var(--hud-u)); height: calc(40 * var(--hud-u)); }
-#tt .title .nm { font-size: calc(32 * var(--hud-u)); }
-#tt .title .sub { font-size: calc(18 * var(--hud-u)); margin-top: calc(12 * var(--hud-u)); }
+#tt .hd img { height: calc(40 * var(--hud-u)); width: auto; }
+#tt .title .sub { font-size: calc(18 * var(--hud-u)); line-height: calc(22 * var(--hud-u)); margin-top: calc(6 * var(--hud-u)); }
 #tt .title .sub span { color: var(--hud-text); }
-#tt .title svg { display: block; margin-top: calc(18 * var(--hud-u)); width: calc(300 * var(--hud-u)); height: auto; overflow: visible; }
+#tt .title svg { margin-top: calc(18 * var(--hud-u)); width: calc(300 * var(--hud-u)); height: auto; overflow: visible; filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }
 #tt .keys { display: flex; gap: calc(26 * var(--hud-u)); font-size: calc(17 * var(--hud-u)); font-weight: var(--hud-w-light); }
-#tt .keys b { font-weight: inherit; background: var(--hud-plate); border: 1px solid var(--hud-quiet); padding: calc(1 * var(--hud-u)) calc(7 * var(--hud-u)); margin-right: calc(6 * var(--hud-u)); }
-#tt .title .keys { margin-top: calc(20 * var(--hud-u)); }
+#tt .keys b { font-weight: inherit; background: var(--hud-plate); border: 1px solid var(--hud-quiet); padding: calc(1 * var(--hud-u)) calc(7 * var(--hud-u)); margin-right: calc(8 * var(--hud-u)); }
+#tt .title .keys { display: flex; margin-top: calc(18 * var(--hud-u)); line-height: calc(24 * var(--hud-u)); }
+#tt .title .keys b { background: none; border-color: var(--hud-text); box-shadow: 0 1px 2px rgba(0,0,0,.5); }
+#tt .title .cr { margin-top: calc(18 * var(--hud-u)); max-width: calc(300 * var(--hud-u)); white-space: normal; font-size: calc(11 * var(--hud-u)); line-height: 1.35; }
+#tt .title .cr a { color: inherit; pointer-events: auto; }
 #tt .count { top: calc(440 * var(--hud-u)); }
 #tt .count > .pl { padding: calc(10 * var(--hud-u)) calc(26 * var(--hud-u)) calc(14 * var(--hud-u)); font-size: calc(40 * var(--hud-u)); line-height: calc(48 * var(--hud-u)); font-weight: var(--hud-w-light); }
 #tt .count .bar { margin-top: calc(8 * var(--hud-u)); height: calc(3 * var(--hud-u)); background: var(--hud-track); }
 #tt .count .bar i { display: block; height: 100%; background: var(--hud-text); transform-origin: 0 0; transform: scaleX(0); will-change: transform; }
-#tt .go { top: calc(70 * var(--hud-u)); will-change: transform, opacity; }
-#tt .go > .pl { padding: calc(4 * var(--hud-u)) calc(30 * var(--hud-u)) calc(8 * var(--hud-u)); font-size: calc(96 * var(--hud-u)); line-height: calc(104 * var(--hud-u)); }
-#tt .lap { top: calc(548 * var(--hud-u)); will-change: transform, opacity; }
-#tt .lap > .pl { text-align: left; padding: calc(10 * var(--hud-u)) calc(20 * var(--hud-u)) calc(12 * var(--hud-u)); }
-#tt .lap .n { font-size: calc(15 * var(--hud-u)); line-height: calc(18 * var(--hud-u)); font-weight: var(--hud-w-light); }
-#tt .lap .t { font-size: calc(36 * var(--hud-u)); line-height: calc(42 * var(--hud-u)); }
-#tt .lap .r { display: flex; gap: calc(16 * var(--hud-u)); font-size: calc(16 * var(--hud-u)); line-height: calc(20 * var(--hud-u)); font-weight: var(--hud-w-light); }
+#tt .go { top: calc(440 * var(--hud-u)); will-change: transform, opacity; }
+#tt .go > .pl { padding: calc(10 * var(--hud-u)) calc(26 * var(--hud-u)) calc(14 * var(--hud-u)); min-width: calc(56 * var(--hud-u)); font-size: calc(40 * var(--hud-u)); line-height: calc(48 * var(--hud-u)); font-weight: var(--hud-w-regular); }
+#tt .go .bar { margin-top: calc(8 * var(--hud-u)); height: calc(3 * var(--hud-u)); background: var(--hud-text); }
+/* Lap result: bottom centre, above the sticks, on a plate: "Lap 2" and the time on one baseline,
+   then the delta and the previous best under a divider. */
+#tt .lap { bottom: calc(124 * var(--hud-u)); will-change: transform, opacity; }
+#tt .lap > .pl { display: inline-flex; flex-direction: column; text-align: left; padding: 0; border-radius: var(--hud-r); }
+#tt .lap .top, #tt .lap .r { display: flex; align-items: baseline; justify-content: space-between; gap: calc(16 * var(--hud-u)); padding: 0 calc(14 * var(--hud-u)); }
+#tt .lap .top { height: calc(52 * var(--hud-u)); align-items: center; }
+#tt .lap .n { font-size: calc(16 * var(--hud-u)); }
+#tt .lap .t { font-size: calc(36 * var(--hud-u)); font-weight: var(--hud-w-light); }
+#tt .lap .r { height: calc(28 * var(--hud-u)); align-items: center; border-top: 1px solid var(--hud-div); font-size: calc(16 * var(--hud-u)); font-weight: var(--hud-w-light); }
 #tt .lap .r .good, #tt .lap .r .bad { font-weight: var(--hud-w-regular); }
 #tt .final { top: calc(560 * var(--hud-u)); will-change: transform, opacity; }
 #tt .final > .pl { padding: calc(8 * var(--hud-u)) calc(22 * var(--hud-u)) calc(10 * var(--hud-u)); font-size: calc(30 * var(--hud-u)); line-height: calc(36 * var(--hud-u)); }
@@ -354,16 +372,17 @@ export class TimeTrial {
     _buildHud() {
         const css = document.createElement('style'); css.textContent = CSS; document.head.appendChild(css);
         this.el = document.createElement('div'); this.el.id = 'tt';
-        this.el.innerHTML = '<div class="title pl"></div><div class="count mid"><div class="pl"><div></div><div class="bar"><i></i></div></div></div>'
-            + '<div class="go mid"><div class="pl">Go</div></div><div class="clock mid"><div class="pl"></div></div><div class="dist pl"></div>'
-            + '<div class="lap mid"><div class="pl"><div class="n q"></div><div class="t"></div><div class="r"><span></span><span class="q"></span></div></div></div>'
-            + '<div class="final mid"><div class="pl">Final lap</div></div><div class="delta mid"><div class="pl"></div></div><div class="fin"></div>';
+        this.el.innerHTML = '<div class="title"></div><div class="count mid"><div class="pl"><div></div><div class="bar"><i></i></div></div></div>'
+            + '<div class="go mid"><div class="pl">Go<div class="bar"></div></div></div>'
+            + '<div class="clock"><div class="pl"></div><div class="delta"><div class="pl"></div></div></div><div class="dist pl"></div>'
+            + '<div class="lap mid"><div class="pl"><div class="top"><span class="n q"></span><span class="t"></span></div><div class="r"><span></span><span class="q"></span></div></div></div>'
+            + '<div class="final mid"><div class="pl">Final lap</div></div><div class="fin"></div>';
         document.body.appendChild(this.el);
         const $ = (s) => this.el.querySelector(s);
         this.ui = {
             title: $('.title'), count: $('.count'), countWord: $('.count .pl > div'), countBar: $('.count .bar i'), go: $('.go'),
             clock: $('.clock'), clockT: $('.clock .pl'), dist: $('.dist'), lap: $('.lap'), lapN: $('.lap .n'), lapT: $('.lap .t'),
-            lapD: $('.lap .r span'), lapB: $('.lap .r .q'), final: $('.final'), delta: $('.delta'), deltaT: $('.delta .pl'), fin: $('.fin'),
+            lapR: $('.lap .r'), lapD: $('.lap .r span'), lapB: $('.lap .r .q'), final: $('.final'), delta: $('.delta'), deltaT: $('.delta .pl'), fin: $('.fin'),
         };
         this.arrow = document.createElement('div'); this.arrow.id = 'tt-arrow'; document.body.appendChild(this.arrow);
         this._cache = new Map();
@@ -385,7 +404,7 @@ export class TimeTrial {
     // surveyed outline (track.js), the gates as short bars across their openings, and either the
     // planned line or the laps flown. The highlighted line runs accent to quiet like the path.
     _plan(lines) {
-        const P = SPONZA_PLAN, pad = 0.6, x0 = P.x[0] - pad, z0 = P.z[0] - pad, W = P.x[1] - P.x[0] + 2 * pad, H = P.z[1] - P.z[0] + 2 * pad;
+        const P = SPONZA_PLAN, pad = 0.1, x0 = P.x[0] - pad, z0 = P.z[0] - pad, W = P.x[1] - P.x[0] + 2 * pad, H = P.z[1] - P.z[0] + 2 * pad;
         const k = 900 / W, X = (x) => ((x - x0) * k).toFixed(1), Z = (z) => ((z - z0) * k).toFixed(1);
         const rect = (r) => `<rect class="wall" x="${X(r.x[0])}" y="${Z(r.z[0])}" width="${((r.x[1] - r.x[0]) * k).toFixed(1)}" height="${((r.z[1] - r.z[0]) * k).toFixed(1)}" stroke-width="1.5"/>`;
         const id = `pg${this._planN = (this._planN || 0) + 1}`;
@@ -414,10 +433,12 @@ export class TimeTrial {
 
     _titleCard() {
         const best = this.bestRun ? `, best <span>${formatTime(this.bestRun.ms)}</span>` : '';
-        const arm = this.keyLabel('arm');
-        this._html(this.ui.title, this._head(`<div class="nm">${this.track.name}</div>`) + `<div class="sub q lt">${this.laps} laps${best}</div>`
+        // Key hints as one pair of keycaps: the arm key (or "Switch" when a radio arms it) and Menu.
+        const arm = this.keyLabel('arm') || 'Switch';
+        this._html(this.ui.title, '<img class="badge" src="brand/cuds-badge.png" alt="CUDS">' + `<div class="nm">${this.track.name}</div><div class="sub q lt">${this.laps} laps${best}</div>`
             + this._plan([{ pts: this._courseLine(), w: 4, hi: true }])
-            + this._keys([[arm, arm ? 'Arm' : ''], [this.keyLabel('menu'), 'Menu']]) + (arm ? '' : '<div class="keys" style="margin-top:0">Arm to start</div>'));
+            + this._keys([[arm, 'Arm'], [this.keyLabel('menu'), 'Menu']])
+            + '<div class="cr q lt"><a href="https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza" target="_blank" rel="noopener">Sponza by Crytek (Frank Meinl, after Marko Dabrovic), PBR textures by Alexandre Pestana</a></div>');
     }
 
     _finishCard() {
@@ -458,30 +479,33 @@ export class TimeTrial {
         if (clockOn) this._text(u.clockT, formatTime(st === 'racing' ? this.race.clock * 1000 : 0));
         // Distance to the next gate, beside its top corner.
         this._distance(st !== 'done', unit);
-        // Gate pass: the delta to the best lap's split, small, just under the clock, for 1.5 s
-        // (a quick fade in and out).
-        const dl = this.delta, dt = dl ? (now - dl.at) / 1000 : 99, dOn = clockOn && dt >= 0 && dt < 1.5;
+        // Gate pass: the delta to the best lap's split, in a row joined under the clock, for 3 s
+        // (in over 120 ms, out over 250 ms); the clock plate's bottom corners square off meanwhile.
+        const dl = this.delta, dt = dl ? (now - dl.at) / 1000 : 99, dOn = clockOn && dt >= 0 && dt < 3.25;
         this._show(u.delta, dOn);
+        this._set(u.clock, 'wd', dOn, (v) => u.clock.classList.toggle('wd', v));
         if (dOn) {
             this._text(u.deltaT, dl.text); this._cls(u.deltaT, 'pl', dl.cls);
-            this._fx(u.delta, Math.min(1, dt / 0.08, (1.5 - dt) / 0.25).toFixed(2), 'none');
+            this._fx(u.delta, Math.min(1, dt / 0.12, (3.25 - dt) / 0.25).toFixed(2), 'none');
         }
-        // Lap complete: lap number and time in the lower third, the delta a beat later; after
-        // ~2 s it folds up into the clock. After the second-last lap, "Final lap" follows.
-        const L = this.lapMoment, lt = L ? (now - L.at) / 1000 : 99, lOn = lt >= 0.1 && lt < 2.5;
+        // Lap complete: lap number and time bottom centre, the delta a beat later; held 3 s, then
+        // it fades. After the second-last lap, "Final lap" follows. body.tt-lap-on while it shows.
+        const L = this.lapMoment, lt = L ? (now - L.at) / 1000 : 99, lOn = lt >= 0.1 && lt < 3.35;
         this._show(u.lap, lOn);
+        this._set(document.body, 'tt-lap-on', lOn, (v) => document.body.classList.toggle('tt-lap-on', v));
         if (lOn) {
             this._text(u.lapT, formatTime(L.ms)); this._text(u.lapN, `Lap ${L.n}`);
             this._text(u.lapD, L.d == null ? '' : deltaText(L.d)); this._cls(u.lapD, '', L.d == null ? '' : deltaCls(L.d));
             this._text(u.lapB, L.prev == null ? '' : `best ${formatTime(L.prev)}`);
+            this._set(u.lapR, 'on', L.d != null || L.prev != null, (v) => (u.lapR.style.display = v ? '' : 'none'));
             this._set(u.lapD, 'vis', lt >= 0.5, (v) => (u.lapD.style.visibility = v ? 'inherit' : 'hidden'));
-            const pin = ease(clamp01((lt - 0.1) / 0.3)), fold = clamp01((lt - 2.0) / 0.5), fy = fold * fold;
-            // Fold target: the clock, top centre (block centre ~590 of 720 up to ~34).
-            this._fx(u.lap, ((0.85 + 0.15 * pin) * (1 - fold)).toFixed(2), `translateY(${(-556 * fy * unit).toFixed(1)}px) scale(${((1 - 0.6 * fold) * (1.06 - 0.06 * pin)).toFixed(3)})`);
+            // In: opacity and a 4u rise over 160 ms (ease-out); out: opacity over 250 ms.
+            const a = ease(clamp01((lt - 0.1) / 0.16)), z = clamp01((lt - 3.1) / 0.25);
+            this._fx(u.lap, (a * (1 - z)).toFixed(2), a < 1 ? `translateY(${(4 * (1 - a) * unit).toFixed(1)}px)` : 'none');
         }
-        const fOn = !!L?.final && lt >= 2.6 && lt < 3.6;
+        const fOn = !!L?.final && lt >= 3.4 && lt < 4.4;
         this._show(u.final, fOn);
-        if (fOn) { const a = clamp01((lt - 2.6) / 0.12), z = clamp01((lt - 3.45) / 0.15); this._fx(u.final, (a * (1 - z)).toFixed(2), `scale(${(1.06 - 0.06 * ease(a)).toFixed(3)})`); }
+        if (fOn) { const a = clamp01((lt - 3.4) / 0.12), z = clamp01((lt - 4.25) / 0.15); this._fx(u.final, (a * (1 - z)).toFixed(2), `scale(${(1.06 - 0.06 * ease(a)).toFixed(3)})`); }
         // Finish: the result card fades in over the run.
         const ft = st === 'done' ? (now - this.doneAt) / 1000 : -1;
         this._show(u.fin, ft >= 0.3);
