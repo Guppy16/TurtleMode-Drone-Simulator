@@ -320,6 +320,9 @@ export class RaceManager {
         // the plane to a single crossing: arriving on it counts, leaving it does not, and sitting
         // on it counts not at all.
         if ((d0 < 0) === (d1 < 0)) return null;
+        // One-way tracks (track.directional) count a gate only when flown along its normal, as
+        // tryfpv does; the default still counts it from either side.
+        if (this.track && this.track.directional && !(d0 < 0 && d1 >= 0)) return null;
 
         // Signed distances of opposite sign, so this is in (0, 1] whichever way the plane was
         // crossed and the sub-frame timing below works unchanged in both directions.
@@ -334,6 +337,14 @@ export class RaceManager {
         const along = this._radial.dot(n);
         this._radial.addScaledVector(n, -along);
 
+        // Square gates (track.square): inside the frame opening, half-width `radius`, measured
+        // along the gate's own horizontal and vertical axes.
+        if (this.track && this.track.square) {
+            const ux = -n.z, uz = n.x, ul = Math.hypot(ux, uz) || 1; // horizontal across the gate
+            const across = (this._radial.x * ux + this._radial.z * uz) / ul;
+            const up = Math.sqrt(Math.max(0, this._radial.lengthSq() - across * across));
+            return Math.abs(across) <= gate.radius && up <= gate.radius ? t : null;
+        }
         return this._radial.length() <= gate.radius ? t : null;
     }
 

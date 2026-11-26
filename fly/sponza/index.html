@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>TurtleMode: Sponza (WebGPU)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px/1.4 ui-monospace, Menlo, monospace; color: #fff; }
+        canvas { display: block; }
+        #hud { position: fixed; left: 10px; top: 8px; white-space: pre; text-shadow: 0 1px 2px #000; pointer-events: none; }
+        #msg { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; background: rgba(0,0,0,.55); white-space: pre-line; }
+        #msg.hidden { display: none; }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "../../vendor/three/three.webgpu.js",
+                "three/webgpu": "../../vendor/three/three.webgpu.js",
+                "three/tsl": "../../vendor/three/three.tsl.js",
+                "three/addons/": "../../vendor/three/addons/",
+                "cannon-es": "../../vendor/cannon-es/cannon-es.js",
+                "three-mesh-bvh": "../../vendor/three-mesh-bvh/index.module.js"
+            }
+        }
+    </script>
+</head>
+<body>
+<div id="hud"></div>
+<div id="msg">Loading…</div>
+<script type="module">
+// Sponza atrium, flown as a tiny whoop, WebGPU only (three r187).
+//
+// Look: the three.js lightprobes_sponza example - a physical SunLight with cascaded shadows, a
+// SkyMesh sky, and a LightProbeGrid baked from the scene at load so light bounced off the sunlit
+// courtyard floor and walls fills the galleries. Flight: the simulator's own PhysicsEngine and
+// InputHandler (js/physics.js, js/input.js), with a whoop preset; collision against a BVH of the
+// whole model through the same callbacks the main simulator uses.
+//
+// URL: q=low|med|high (quality preset), scale (render scale, overrides preset), probes=0,
+// shadows=0, bounces, cam=fpv|chase, uptilt (deg), fov (deg), sun=azimuth,elevation,
+// mode=fly|bench (bench: scripted path, publishes window.benchResult for tools/bench).
+import * as THREE from 'three/webgpu';
+import { pass, mrt, output, velocity } from 'three/tsl';
+import { traa } from 'three/addons/tsl/display/TRAANode.js';
+import { taau } from 'three/addons/tsl/display/TAAUNode.js';
+import { smaa } from 'three/addons/tsl/display/SMAANode.js';
+import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
+import { fsr1 } from 'three/addons/tsl/display/FSR1Node.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
+import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
+import { SunLight } from 'three/addons/lights/SunLight.js';
+import { SunLightNode } from 'three/addons/lights/SunLightNode.js';
+import { LightProbeGrid } from 'three/addons/lighting/LightProbeGrid.js';
+import { computeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+import { PhysicsEngine } from '../../js/physics.js?v=36';
+import { InputHandler } from '../../js/input.js?v=36';
+import * as CANNON from 'cannon-es';
+import { PilotUI } from './controls.js';
+import { AudioEngine } from '../../js/audio.js?v=36';
+import { RaceManager } from '../../js/race.js?v=36';
+import { formatTime } from '../../js/tracks.js?v=36';
+import { SPONZA_TRACK, SPONZA_TRACK_SPAWN, withFacing, linePoints } from './track.js';
+import { TimeTrial } from './timetrial.js';
+import { Autopilot } from './autopilot.js';
+
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+const q = new URLSearchParams(location.search);
+const msg = document.getElementById('msg'), hud = document.getElementById('hud');
+// Measured on the target laptop (Iris Plus G7, 1920x1200, vsync on, sustained): rendering straight
+// to the canvas with a depth pre-pass and letting the compositor upscale beats the post chain
+// (TRAA / FSR1 / TAAU each cost several ms per full-screen pass here): med 58 fps vs 31 with TRAA.
+const PRESETS = {
+    low:  { scale: 0.67, shadow: 2048, msaa: false, probes: [8, 5, 5],  cube: 16, post: 0, zpre: '1' },
+    med:  { scale: 0.8,  shadow: 2048, msaa: true,  probes: [10, 7, 7], cube: 32, post: 0, zpre: '1' },
+    high: { scale: 1.0,  shadow: 4096, msaa: true,  probes: [14, 8, 8], cube: 32, post: 0, zpre: '1' },
+};
+const preset = { ...PRESETS[q.get('q') || 'med'] };
+if (q.get('scale')) preset.scale = Number(q.get('scale'));
+if (q.get('taa')) preset.taa = q.get('taa') === '1';
+
+if (!navigator.gpu) { msg.textContent = 'This map needs WebGPU.\nBrave on Linux: start it with\n--enable-unsafe-webgpu --enable-features=Vulkan'; throw new Error('no WebGPU'); }
+
+const renderer = new THREE.WebGPURenderer({ antialias: q.get('msaa') != null ? q.get('msaa') === '1' : preset.msaa, powerPreference: 'high-performance', trackTimestamp: (q.get('mode') === 'bench' && q.get('ts') !== '0') || q.get('gpuTime') === '1' });
+renderer.setPixelRatio(1);
+// Bench: render at exactly ?w x ?h whatever the window is (so runs are comparable).
+const W = () => Number(q.get('w') || innerWidth), H = () => Number(q.get('h') || innerHeight);
+renderer.setSize(W(), H(), !q.get('w'));
+// Looks: `noon` is the original (white sun, whites near clipping); `warm` is a lower, yellower
+// late-afternoon sun with less exposure; `agx` is warm through AgX, which rolls highlights off
+// instead of clipping them. Changing look reloads (the bounce light is baked from the sun).
+const LOOKS = {
+    noon: { sunI: 100, sunC: 0xfff2dc, exp: 1.0, tm: THREE.ACESFilmicToneMapping, el: 60 },
+    warm: { sunI: 75, sunC: 0xffdcae, exp: 0.85, tm: THREE.ACESFilmicToneMapping, el: 60 },
+    agx:  { sunI: 85, sunC: 0xffdcae, exp: 1.0, tm: THREE.AgXToneMapping, el: 60 },
+};
+const lookName = LOOKS[q.get('look')] ? q.get('look') : (LOOKS[localStorage.getItem('tm.look')] ? localStorage.getItem('tm.look') : 'warm');
+const LOOK = LOOKS[lookName];
+renderer.toneMapping = LOOK.tm;
+renderer.toneMappingExposure = Number(q.get('exposure') || LOOK.exp);
+renderer.shadowMap.enabled = q.get('shadows') !== '0';
+document.body.prepend(renderer.domElement);
+await renderer.init();
+if (!renderer.backend.isWebGPUBackend) { msg.textContent = 'WebGPU adapter not available (fell back to WebGL).'; throw new Error('no WebGPU backend'); }
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(Number(q.get('fov') || 85), W() / H(), 0.01, 400);
+
+const sky = new SkyMesh();
+sky.scale.setScalar(450000);
+sky.turbidity.value = 10; sky.rayleigh.value = 2; sky.mieCoefficient.value = 0.005; sky.mieDirectionalG.value = 0.8;
+if (sky.cloudSpeed) sky.cloudSpeed.value = 0;
+if (sky.showSunDisc) sky.showSunDisc.value = false;
+scene.add(sky);
+
+// --- Model ---
+const t0 = performance.now();
+const LOCAL = '../../assets/models/sponza/Sponza.gltf';
+const REMOTE = 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Sponza/glTF/Sponza.gltf';
+const manager = new THREE.LoadingManager();
+manager.onProgress = (u, a, b) => { msg.textContent = `Loading Sponza… ${a}/${b}`; };
+const loader = new GLTFLoader(manager);
+const haveLocal = (await fetch(LOCAL, { method: 'HEAD' }).catch(() => null))?.ok;
+// GPU-compressed textures (tools/assets/dds_encode.py -> assets/models/sponza/dds/): each glTF
+// texture is swapped for its DXT1/DXT5 .dds at load, before anything reaches the GPU. ~50 MB of
+// texture memory instead of ~380 MB, and far less bandwidth per sample. dds=0 to compare.
+const useDDS = haveLocal && q.get('dds') !== '0' && renderer.hasFeature?.('texture-compression-bc')
+    && (await fetch('../../assets/models/sponza/dds/5823059166183034438.dds', { method: 'HEAD' }).catch(() => null))?.ok;
+const aniso = Number(q.get('aniso') || 4);
+if (useDDS) {
+    const dds = new DDSLoader(manager);
+    const WRAP = { 33071: THREE.ClampToEdgeWrapping, 33648: THREE.MirroredRepeatWrapping, 10497: THREE.RepeatWrapping };
+    let normalTex = null;
+    loader.register((parser) => ({
+        name: 'dds-swap',
+        loadTexture(i) {
+            const json = parser.json, td = json.textures[i], uri = json.images[td.source]?.uri;
+            // Normal maps stay uncompressed: BC1 (a colour format) breaks them - stray texels tilt
+            // far off the surface, showing as sky-blue and black specks (e.g. under the arches).
+            normalTex ??= new Set((json.materials || []).map((m) => m.normalTexture?.index).filter((x) => x !== undefined));
+            if (!uri || normalTex.has(i)) return null;
+            return dds.loadAsync('../../assets/models/sponza/dds/' + uri.replace(/\.\w+$/, '.dds')).then((t) => {
+                const sm = json.samplers?.[td.sampler] || {};
+                t.flipY = false;
+                t.wrapS = WRAP[sm.wrapS ?? 10497]; t.wrapT = WRAP[sm.wrapT ?? 10497];
+                t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter;
+                t.anisotropy = aniso;
+                parser.associations.set(t, { textures: i });
+                return t;
+            });
+        },
+    }));
+}
+const gltf = await loader.loadAsync(haveLocal ? LOCAL : REMOTE);
+const model = gltf.scene;
+const lights = [];
+model.traverse((o) => { if (o.isMesh) { o.castShadow = o.receiveShadow = true; } else if (o.isLight) lights.push(o); });
+lights.forEach((l) => l.parent?.remove(l));
+scene.add(model);
+model.updateMatrixWorld(true);
+const box = new THREE.Box3().setFromObject(model), size = box.getSize(new THREE.Vector3());
+
+// --- Sun ---
+const [sunAz, sunEl] = (q.get('sun') || `-75,${LOOK.el}`).split(',').map(Number);
+// One directional light whose shadow map is fitted tightly round the atrium and rendered once:
+// the building and the sun never move, so cascades re-rendered every frame (the example's
+// SunLight) only cost time - they were the frame-time spikes. The whoop casts no shadow.
+const sunDir = new THREE.Vector3().setFromSphericalCoords(1, Math.PI / 2 - THREE.MathUtils.degToRad(sunEl), THREE.MathUtils.degToRad(sunAz));
+const sun = new THREE.DirectionalLight(LOOK.sunC, Number(q.get('sunI') || LOOK.sunI));
+const centre = box.getCenter(new THREE.Vector3());
+sun.position.copy(centre).addScaledVector(sunDir, 60); sun.target.position.copy(centre);
+scene.add(sun, sun.target);
+sky.sunPosition.value.copy(sunDir);
+sun.castShadow = renderer.shadowMap.enabled;
+if (sun.castShadow) {
+    const sc = sun.shadow.camera, M = new THREE.Matrix4().lookAt(sun.position, centre, new THREE.Vector3(0, 1, 0)).setPosition(sun.position).invert();
+    const fit = new THREE.Box3();
+    for (let i = 0; i < 8; i++) fit.expandByPoint(new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).applyMatrix4(M));
+    sc.left = fit.min.x; sc.right = fit.max.x; sc.bottom = fit.min.y; sc.top = fit.max.y; sc.near = -fit.max.z - 1; sc.far = -fit.min.z + 1;
+    sc.updateProjectionMatrix();
+    sun.shadow.mapSize.setScalar(preset.shadow);
+    sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.02;
+    sun.shadow.autoUpdate = false; sun.shadow.needsUpdate = true;
+}
+
+// --- Collision: one BVH over the whole model (every surface is solid) ---
+msg.textContent = 'Building collision…';
+await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+// Sponza's materials by index (glTF order): 14-19 are the hanging curtains and banners, 0 and 3
+// the ivy and potted plants. Those aren't solid: cloth snags the whoop (see `snag` below) and
+// leaves only drag on it. Everything else is a hard surface.
+const CLOTH = new Set([14, 15, 16, 17, 18, 19]), PLANT = new Set([0, 3]);
+const matIndex = (m) => gltf.parser.associations.get(m)?.materials;
+const geoms = [], clothG = [], plantG = [];
+model.traverse((o) => {
+    if (!o.isMesh || !o.geometry.attributes.position) return;
+    const mi = matIndex(o.material), list = CLOTH.has(mi) ? clothG : PLANT.has(mi) ? plantG : geoms;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', o.geometry.attributes.position.clone());
+    if (o.geometry.index) g.setIndex(o.geometry.index.clone());
+    g.applyMatrix4(o.matrixWorld);
+    list.push(g);
+});
+const softBVH = (list) => { if (!list.length) return null; const m = BufferGeometryUtils.mergeGeometries(list); m.computeBoundsTree(); return m.boundsTree; };
+const clothBVH = softBVH(clothG), plantBVH = softBVH(plantG);
+const collGeom = BufferGeometryUtils.mergeGeometries(geoms);
+geoms.forEach((g) => g.dispose());
+const tb = performance.now();
+collGeom.computeBoundsTree();
+const bvhMs = Math.round(performance.now() - tb);
+const bvh = collGeom.boundsTree;
+const _p = new THREE.Vector3(), _t = {}, _ray = new THREE.Ray(), _d = new THREE.Vector3();
+const hit = { closestPoint: new THREE.Vector3(), dist: 0, depth: 0, normal: new THREE.Vector3() };
+const sweepHit = { point: new THREE.Vector3(), normal: new THREE.Vector3(), distance: 0 };
+function checkCollision(pos, radius) {
+    _p.set(pos.x, pos.y, pos.z);
+    const r = bvh.closestPointToPoint(_p, _t, 0, radius);
+    if (!r || r.distance >= radius) return null;
+    hit.closestPoint.copy(r.point); hit.dist = r.distance; hit.depth = radius - r.distance;
+    hit.normal.subVectors(_p, r.point);
+    if (hit.normal.lengthSq() > 1e-8) hit.normal.normalize(); else hit.normal.set(0, 1, 0);
+    return hit;
+}
+function sweep(from, to) {
+    _ray.origin.set(from.x, from.y, from.z);
+    _d.set(to.x - from.x, to.y - from.y, to.z - from.z);
+    const travel = _d.length(); if (travel < 1e-6) return null;
+    _ray.direction.copy(_d.multiplyScalar(1 / travel));
+    const h = bvh.raycastFirst(_ray, THREE.DoubleSide);
+    if (!h || h.distance > travel) return null;
+    sweepHit.point.copy(h.point); sweepHit.distance = h.distance;
+    if (h.face?.normal) { sweepHit.normal.copy(h.face.normal); if (sweepHit.normal.dot(_ray.direction) > 0) sweepHit.normal.negate(); }
+    else sweepHit.normal.copy(_ray.direction).negate();
+    return sweepHit;
+}
+
+if (q.get('mode') === 'survey') {
+    // Debug: distances to surfaces along a few rays, to place probe volumes inside open space.
+    const out = {};
+    for (const [name, o, d] of [['+z y2', [0, 2, 0], [0, 0, 1]], ['-z y2', [0, 2, 0], [0, 0, -1]], ['+z y7', [0, 7, 0], [0, 0, 1]], ['-z y7', [0, 7, 0], [0, 0, -1]],
+        ['+x y2', [0, 2, 0], [1, 0, 0]], ['-x y2', [0, 2, 0], [-1, 0, 0]], ['up z-7', [0, 0.5, -7], [0, 1, 0]], ['up z7', [0, 0.5, 7], [0, 1, 0]],
+        ['+x z-7', [0, 2, -7], [1, 0, 0]], ['-x z-7', [0, 2, -7], [-1, 0, 0]], ['+x z7', [0, 2, 7], [1, 0, 0]], ['-x z7', [0, 2, 7], [-1, 0, 0]],
+        ['up z-7 y5', [0, 5.5, -7], [0, 1, 0]], ['+z x-12', [-12, 2, 0], [0, 0, 1]]]) {
+        const ray = new THREE.Ray(new THREE.Vector3(...o), new THREE.Vector3(...d));
+        out[name] = bvh.raycast(ray, THREE.DoubleSide).map((h) => +h.distance.toFixed(2)).sort((a2, b2) => a2 - b2).slice(0, 8);
+    }
+    for (let x = -13; x <= 13; x += 1) for (const dz of [1, -1]) {
+        const ray = new THREE.Ray(new THREE.Vector3(x, 1.5, 0), new THREE.Vector3(0, 0, dz));
+        out[`x${x} z${dz > 0 ? '+' : '-'}`] = bvh.raycast(ray, THREE.DoubleSide).map((h) => +h.distance.toFixed(1)).sort((a2, b2) => a2 - b2).slice(0, 6);
+    }
+    // Vertical sections: every surface hit going down from y = 11 (solid) and the cloth.
+    const col = {};
+    for (const z of [-8, -7, -6, -5, -4.4, -3.5, 0, 3.5, 4.4, 5, 6, 7, 8]) for (const x of [-12, -6, 0, 6, 12]) {
+        const r = new THREE.Ray(new THREE.Vector3(x, 11.2, z), new THREE.Vector3(0, -1, 0));
+        col[`x${x} z${z}`] = bvh.raycast(r, THREE.DoubleSide).map((h) => +h.point.y.toFixed(2)).sort((a2, b2) => b2 - a2).slice(0, 6);
+    }
+    out.sections = col;
+    // First-floor gallery at y = 4.3 (floor 3.32): free distance in 6 directions from points
+    // along the galleries, counting cloth and plants as obstacles too.
+    const freeAll = (o, d) => Math.min(...[bvh, clothBVH, plantBVH].map((B) => B.raycastFirst(new THREE.Ray(o, d), THREE.DoubleSide)?.distance ?? 99));
+    const ff = {};
+    for (const [x, z] of [[0, 3.6], [0, 4.0], [0, 4.4], [-6, 4.0], [6, 4.0], [0, -4.0], [8, 0], [9, 0], [10, 0], [-9, 0], [-10, 0], [-11, 0], [9, 4.0], [-10, 4.0], [9, -4.0], [-10, -4.0], [0, 2.5], [0, -2.5], [-6, 2.5], [5, 2.5]]) {
+        const o = new THREE.Vector3(x, 4.3, z);
+        ff[`${x},${z}`] = ['+x', '-x', '+z', '-z', 'up', 'dn'].map((n, k) => `${n}:${freeAll(o, [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]][k].reduce((v, c, i) => (v.setComponent(i, c), v), new THREE.Vector3())).toFixed(2)}`).join(' ');
+    }
+    out.ff = ff;
+    const dn = (x, z) => +(bvh.raycastFirst(new THREE.Ray(new THREE.Vector3(x, 4.3, z), new THREE.Vector3(0, -1, 0)), THREE.DoubleSide)?.distance ?? 99).toFixed(2);
+    out.edgeZ = []; for (let z = 0; z <= 4.4; z += 0.2) out.edgeZ.push(`${z.toFixed(1)}:${dn(0, z)}`);
+    out.edgeX = []; for (let x = 4; x <= 10; x += 0.25) out.edgeX.push(`${x}:${dn(x, 0)}`);
+    out.edgeXw = []; for (let x = -12; x <= -6; x += 0.25) out.edgeXw.push(`${x}:${dn(x, 0)}`);
+    out.colRows = {};
+    for (const z of [1.6, 1.8, 2.0, 2.2, 2.4, 2.8, 3.4]) { const hits = bvh.raycast(new THREE.Ray(new THREE.Vector3(-11.4, 4.3, z), new THREE.Vector3(1, 0, 0)), THREE.DoubleSide).map((h) => +h.point.x.toFixed(2)).sort((a2, b2) => a2 - b2); out.colRows[z] = hits.slice(0, 24); }
+    out.win = {};
+    for (const x of [-7.12, -5.74, -4.17, -2.77, -1.21, 0.19, 1.74, 3.15, 4.72, 6.1]) for (const z of [1.7, -1.7]) {
+        const o = new THREE.Vector3(x, 4.5, z);
+        const up = bvh.raycastFirst(new THREE.Ray(o, new THREE.Vector3(0, 1, 0)), THREE.DoubleSide)?.distance ?? 99, dn = bvh.raycastFirst(new THREE.Ray(o, new THREE.Vector3(0, -1, 0)), THREE.DoubleSide)?.distance ?? 99;
+        const px = bvh.raycastFirst(new THREE.Ray(o, new THREE.Vector3(1, 0, 0)), THREE.DoubleSide)?.distance ?? 99, nx = bvh.raycastFirst(new THREE.Ray(o, new THREE.Vector3(-1, 0, 0)), THREE.DoubleSide)?.distance ?? 99;
+        out.win[`${x},${z}`] = `top ${(4.5 + up).toFixed(2)} sill ${(4.5 - dn).toFixed(2)} x ${(x - nx).toFixed(2)}..${(x + px).toFixed(2)}`;
+    }
+    out.sep = {};
+    for (const [x, z] of [[0, 0], [0, 2.5], [0, 4.0], [8, 0]]) out.sep[`${x},${z}`] = ['solid', 'cloth', 'plant'].map((n, k) => `${n}:dn ${[bvh, clothBVH, plantBVH][k].raycastFirst(new THREE.Ray(new THREE.Vector3(x, 4.3, z), new THREE.Vector3(0, -1, 0)), THREE.DoubleSide)?.distance?.toFixed(2)} +z ${[bvh, clothBVH, plantBVH][k].raycastFirst(new THREE.Ray(new THREE.Vector3(x, 4.3, z), new THREE.Vector3(0, 0, 1)), THREE.DoubleSide)?.distance?.toFixed(2)}`).join('  ');
+    window.benchResult = { box: [box.min.toArray(), box.max.toArray()], rays: out };
+    if (q.get('gates') === '1') {
+        // Course check, counting cloth and plants as obstacles: free space round each square
+        // gate (16 directions in its plane; must exceed the half-opening plus the whoop), and
+        // the flown path - lead-in / lead-out along each gate's normal through every gate, the
+        // same curve the path-ahead line uses - sampled every 5 cm.
+        const freeAll = (o, d) => Math.min(...[bvh, clothBVH, plantBVH].filter(Boolean).map((B) => B.raycastFirst(new THREE.Ray(o, d.clone().normalize()), THREE.DoubleSide)?.distance ?? 99));
+        const G = withFacing(SPONZA_TRACK.gates).map((g) => {
+            const yaw = THREE.MathUtils.degToRad(g.yaw), pit = THREE.MathUtils.degToRad(g.pitch);
+            return { ...g, p: new THREE.Vector3(g.x, g.y, g.z), n: new THREE.Vector3(Math.sin(yaw) * Math.cos(pit), Math.sin(pit), -Math.cos(yaw) * Math.cos(pit)) };
+        });
+        const gates = G.map((g) => {
+            const u = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), g.n).normalize(), v = new THREE.Vector3().crossVectors(g.n, u);
+            let minR = 99; for (let k = 0; k < 16; k++) { const a2 = k / 16 * Math.PI * 2; minR = Math.min(minR, freeAll(g.p, u.clone().multiplyScalar(Math.cos(a2)).addScaledVector(v, Math.sin(a2)))); }
+            return { name: g.name, yaw: Math.round(g.yaw), pitch: Math.round(g.pitch), planeFree: +minR.toFixed(2), ahead: +freeAll(g.p, g.n).toFixed(2), behind: +freeAll(g.p, g.n.clone().negate()).toFixed(2) };
+        });
+        const pts = linePoints(G, THREE.Vector3, (g) => g.n);
+        const curve = new THREE.CatmullRomCurve3(pts, true, 'centripetal'), N = Math.ceil(curve.getLength() / 0.05);
+        const hits = []; let minC = 99, minAt = null;
+        for (let k = 0; k < N; k++) {
+            const a2 = curve.getPointAt(k / N), b2 = curve.getPointAt((k + 1) / N), d = b2.clone().sub(a2);
+            if (freeAll(a2, d) < d.length()) hits.push(a2.toArray().map((v) => +v.toFixed(2)));
+            for (const dir of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) { const f = freeAll(a2, new THREE.Vector3(...dir)); if (f < minC) { minC = f; minAt = a2.toArray().map((v) => +v.toFixed(2)); } }
+        }
+        // Tightest turn: the smallest radius of curvature along the path.
+        let minRad = 99, radAt = null;
+        for (let k = 0; k < N; k += 2) { const p0 = curve.getPointAt(k / N), p1 = curve.getPointAt(((k + 4) % N) / N), p2 = curve.getPointAt(((k + 8) % N) / N);
+            const a3 = p0.distanceTo(p1), b3 = p1.distanceTo(p2), c3 = p0.distanceTo(p2), ar = new THREE.Vector3().crossVectors(p1.clone().sub(p0), p2.clone().sub(p0)).length() / 2;
+            const R = ar > 1e-6 ? (a3 * b3 * c3) / (4 * ar) : 99; if (R < minRad) { minRad = R; radAt = p1.toArray().map((v) => +v.toFixed(2)); } }
+        window.benchResult = { gates, line: { length: +curve.getLength().toFixed(1), nHits: hits.length, hits: hits.slice(0, 12), minClearance: +minC.toFixed(2), minAt, minTurnRadius: +minRad.toFixed(2), radAt } };
+    }
+    throw new Error('survey done');
+}
+// --- Bounce light: probe grid baked from the scene (bounds from the three.js example) ---
+let probeMs = 0;
+if (q.get('probes') !== '0') {
+    msg.textContent = 'Baking bounce light…';
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const [nx, ny, nz] = q.get('probeN') ? q.get('probeN').split(',').map(Number) : preset.probes;
+    // Central grid: bounds from the three.js example (courtyard and galleries). The grid has no
+    // probe visibility, so probes inside walls see black and darken their neighbours: a single
+    // grid over the whole building (tried) came out darker and took 8-17 s. Instead four small
+    // grids sit inside the surrounding aisles, measured by raycasts (aisle walls at z +8.2 / -9.0,
+    // end walls at x +13.9 / -14.8, ceiling ~11 m), overlapping the central grid a little; where
+    // grids overlap the central one wins (priority). Outside every grid there is no bounce light.
+    const grids = [];
+    const addGrid = (min, max, n, priority) => {
+        const sz = new THREE.Vector3(...max).sub(new THREE.Vector3(...min));
+        const g = new LightProbeGrid(sz.x, sz.y, sz.z, ...n);
+        g.position.set((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
+        g.priority = priority; scene.add(g); grids.push(g);
+    };
+    addGrid([-12.15, -0.4, -5.55], [11.15, 12.4, 4.95], [nx, ny, nz], 1);
+    if (q.get('aisles') === '1') { // off by default: +3 s bake, little gain (the aisles are enclosed and dark)
+        const k = preset.cube === 16 ? 1 : 1.5;
+        addGrid([-14.2, 0.4, 4.6], [13.3, 10.4, 7.6], [Math.round(10 * k), 5, 3], 0);
+        addGrid([-14.2, 0.4, -8.4], [13.3, 10.4, -5.2], [Math.round(10 * k), 5, 3], 0);
+        addGrid([-14.2, 0.4, -8.4], [-11.8, 10.4, 7.6], [2, 5, Math.round(6 * k)], 0);
+        addGrid([10.8, 0.4, -8.4], [13.3, 10.4, 7.6], [2, 5, Math.round(6 * k)], 0);
+    }
+    const tp = performance.now(), bounces = Number(q.get('bounces') ?? 1);
+    for (let p = 0; p <= bounces; p++)
+        for (const g of grids) {
+            const total = g.resolution.x * g.resolution.y * g.resolution.z;
+            for (let s = 0; s < total; s += 16)
+                g.bake(renderer, scene, { cubemapSize: preset.cube, near: 0.05, far: Math.max(size.x, size.y, size.z) * 2, start: s, count: Math.min(16, total - s), pass: p });
+        }
+    await renderer.backend.device?.queue.onSubmittedWorkDone?.();
+    probeMs = Math.round(performance.now() - tp);
+}
+
+// --- Drone: the simulator's physics, scaled to a 1S tiny whoop (~32 g, 65 mm, ducted) ---
+const physics = new PhysicsEngine();
+physics.updateConfig({ mass: 0.032, thrustCurve: 0.5, restitution: 0.3, friction: 0.35 });
+// Flight settings (sliders in the M panel; tiny-whoop defaults in controls.js).
+function applySettings(st) {
+    physics.updateConfig({ thrust: 0.032 * 9.81 * st.twr, propPitchSpeed: st.speed,
+        rates: { roll: { center: st.rollCenter, max: st.rollMax, expo: st.rollExpo }, pitch: { center: st.pitchCenter, max: st.pitchMax, expo: st.pitchExpo }, yaw: { center: st.yawCenter, max: st.yawMax, expo: st.yawExpo } } });
+    if (st.uptilt !== uptilt) { uptilt = st.uptilt; mountCamera?.(); }
+}
+physics.dragAreas = { x: 0.0011, y: 0.0035, z: 0.001 };
+physics.rotorDrag = 0.45 * (0.032 / 0.5);
+// Ducts: contact spheres at the four duct centres plus the middle, coplanar with the CoM.
+const a = 0.032, r = 0.024;
+// Five points, as the solver's scratch arrays expect: the four ducts, and the fifth just ahead of
+// centre where the camera sits, so it can't poke through a wall.
+physics.contactPoints = [[-a, -a], [a, -a], [-a, a], [a, a], [0, -0.03]].map(([x, z]) => ({ offset: new CANNON.Vec3(x, 0, z), radius: r }));
+physics.broadPhaseRadius = 0.09;
+physics.collisionCallback = checkCollision;
+physics.sweepCallback = sweep;
+// Race (time trial) on by default: spawn at the start of the first-floor gallery course.
+// ?race=0 for free flight from the courtyard.
+const RACE = q.get('race') !== '0';
+const SP = SPONZA_TRACK_SPAWN;
+const spawn = (q.get('spawn') || (RACE ? `${SP.x},0.15,${SP.z},${SP.yaw}` : '0,0.15,0,90')).split(',').map(Number);
+// Spawn on the floor under (x, z): the ground floor, or the gallery floor for the race start
+// (the ray starts just above that floor; the model's box reaches below the ground).
+const floorY = (() => { _ray.origin.set(spawn[0], RACE && !q.get('spawn') ? SP.y + 0.5 : box.min.y + 3.5, spawn[2]); _ray.direction.set(0, -1, 0); const h = bvh.raycastFirst(_ray, THREE.DoubleSide); return h ? h.point.y : 0; })();
+physics.setSpawn(spawn[0], floorY + spawn[1], spawn[2], spawn[3]);
+// --- Gates and timing: the main sim's RaceManager (gate crossing, laps, local leaderboard)
+// with square one-way gates; the time trial (gates' look, path ahead, countdown, sounds, ghost,
+// splits) is in timetrial.js.
+const race = new RaceManager({ scene });
+let tt = null;
+if (RACE) race.setTrack({ ...SPONZA_TRACK, gates: withFacing(SPONZA_TRACK.gates) });
+physics.reset();
+const input = new InputHandler();
+let uptilt = 15, mountCamera = null;
+
+// Camera: FPV on the airframe (uptilt like a whoop cam), or a chase view (C toggles).
+const rig = new THREE.Object3D(); scene.add(rig);
+const pod = new THREE.Object3D(); pod.position.set(0, 0.012, -0.02); rig.add(pod);
+let camMode = q.get('cam') || 'fpv';
+mountCamera = function () {
+    if (camMode === 'fpv') { pod.add(camera); camera.position.set(0, 0, 0); camera.rotation.set(THREE.MathUtils.degToRad(uptilt), 0, 0); }
+    else scene.add(camera);
+};
+// Reset: back to the spawn, disarmed-safe (it stays armed if the switch is armed, like a real
+// sim's "respawn"), and out of any snag.
+function resetDrone() { physics.reset(); snag.t = 0; snag.hold = null; safe.length = 0; tt?.reset(); }
+// Recover (tryfpv-style respawn): back to where the whoop last flew freely, dropped onto the floor
+// below that point, level, keeping its heading and staying armed. Safe points are sampled every
+// 0.25 s while clear of walls and cloth; the newest ~1 s is skipped (that's usually the crash).
+const safe = [];
+let safeT = 0;
+function trackSafe(dt) {
+    safeT += dt;
+    if (safeT < 0.25) return;
+    safeT = 0;
+    if (physics._inContact || snag.hold || snag.t > 0) return;
+    safe.push(physics.droneBody.position.clone());
+    if (safe.length > 40) safe.shift();
+}
+function recoverDrone() {
+    const b = physics.droneBody, p = safe.length > 4 ? safe[safe.length - 5] : (safe[0] || b.position);
+    _ray.origin.set(p.x, p.y + 0.05, p.z); _ray.direction.set(0, -1, 0);
+    const h = bvh.raycastFirst(_ray, THREE.DoubleSide);
+    if (!h) return resetDrone();
+    const f = new THREE.Vector3(0, 0, -1).applyQuaternion(b.quaternion), yaw = Math.atan2(-f.x, -f.z) * 180 / Math.PI;
+    const keep = { p: physics.spawn.position.clone(), q: physics.spawn.quaternion.clone() };
+    physics.setSpawn(h.point.x, h.point.y + 0.15, h.point.z, -yaw);
+    physics.reset();
+    physics.spawn.position.copy(keep.p); physics.spawn.quaternion.copy(keep.q);
+    snag.t = 0; snag.hold = null; safe.length = Math.max(0, safe.length - 5);
+    snag.msgUntil = performance.now() + 900; snag.msg = 'RECOVER';
+}
+// G cycles the lighting look; it reloads, because the bounce light is baked from the sun.
+function nextLook() {
+    const names = Object.keys(LOOKS), n = names[(names.indexOf(lookName) + 1) % names.length];
+    localStorage.setItem('tm.look', n);
+    const u = new URL(location.href); u.searchParams.delete('look'); location.href = u.href;
+}
+const ui = new PilotUI({ input, onReset: resetDrone, onRecover: recoverDrone, onLook: nextLook, onCamera: () => toggleCam(), onSettings: applySettings });
+// Motor sound: the main sim's synth, retuned for a whoop (tiny 0802 motors spin 25-40k rpm with
+// 4-blade 31 mm props: a whine an octave and more above a 5-inch quad). Browsers only start audio
+// after a click or key press, so the first one starts it.
+const audio = new AudioEngine();
+Object.assign(audio, { minFrequency: 170, maxFrequency: 640, bladeCount: 4, maxToneGain: 0.02, airReferenceSpeed: 12 });
+const startAudio = () => { if (!audio.ctx) audio.start(); };
+addEventListener('pointerdown', startAudio); addEventListener('keydown', startAudio);
+applySettings(ui.set);
+if (RACE) tt = new TimeTrial({ scene, race, track: SPONZA_TRACK, camera, getAudio: () => { if (!audio.ctx) return null; if (audio.ctx.state === 'suspended') audio.ctx.resume(); return audio.ctx; } });
+mountCamera();
+const whoop = new THREE.Mesh(new THREE.TorusGeometry(0.028, 0.006, 6, 16).rotateX(Math.PI / 2), new THREE.MeshStandardNodeMaterial({ color: 0x222222, roughness: 0.6 }));
+const whoopG = new THREE.Group();
+for (const [x, z] of [[-a, -a], [a, -a], [-a, a], [a, a]]) { const m = whoop.clone(); m.position.set(x, 0, z); whoopG.add(m); }
+whoopG.add(new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.015, 0.05), new THREE.MeshStandardNodeMaterial({ color: 0xd04020, roughness: 0.5 })));
+whoopG.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+scene.add(whoopG);
+whoopG.visible = camMode !== 'fpv';
+// Auto-exposure, as an FPV camera does: brighter under a roof (galleries, arcades, bays), back
+// to the look's exposure under open sky. Ten times a second a ray goes straight up from the
+// camera and one towards the sun; the exposure eases to the target over ~0.6 s. ?ae=0 turns it off.
+const AE = q.get('ae') !== '0' && !q.get('exposure');
+const aeState = { t: 0, target: renderer.toneMappingExposure, base: renderer.toneMappingExposure };
+const _aeRay = new THREE.Ray();
+function autoExposure(dt) {
+    if (!AE) return;
+    aeState.t -= dt;
+    if (aeState.t <= 0) {
+        aeState.t = 0.1;
+        camera.getWorldPosition(_aeRay.origin);
+        _aeRay.direction.set(0, 1, 0);
+        const roofed = !!bvh.raycastFirst(_aeRay, THREE.DoubleSide);
+        _aeRay.direction.copy(sunDir);
+        const shaded = !!bvh.raycastFirst(_aeRay, THREE.DoubleSide);
+        aeState.target = aeState.base * (roofed ? 2.5 : shaded ? 1.4 : 1.0);
+    }
+    renderer.toneMappingExposure += (aeState.target - renderer.toneMappingExposure) * Math.min(1, dt / 0.6);
+}
+// Camera view toggle: bound in the pilot menu (C by default, or a switch).
+function toggleCam() { camMode = camMode === 'fpv' ? 'chase' : 'fpv'; whoopG.visible = camMode !== 'fpv'; mountCamera(); }
+
+// --- Post: scene pass, temporal AA at a reduced render scale (upscaled by TRAA's resolve) ---
+const post = new THREE.RenderPipeline(renderer);
+let scenePass;
+function setupPost() {
+    scenePass = pass(scene, camera);
+    // aa: taa (TRAA at the render scale), taau (temporal upscaling from the render scale to full
+    // resolution in one pass), smaa, fxaa, none.
+    const aa = q.get('aa') || preset.aa || (preset.taa ? 'taa' : 'none');
+    if (aa === 'taa' || aa === 'taau') {
+        scenePass.setMRT(mrt({ output, velocity }));
+        post.outputNode = (aa === 'taau' ? taau : traa)(scenePass.getTextureNode('output'), scenePass.getTextureNode('depth'), scenePass.getTextureNode('velocity'), camera);
+    } else if (aa === 'smaa') post.outputNode = smaa(scenePass);
+    else if (aa === 'fxaa') post.outputNode = fxaa(scenePass);
+    else post.outputNode = scenePass;
+    // Below full resolution, upscale with FSR1 (edge-adaptive upsample + sharpening) rather than a
+    // bilinear stretch - except after TAAU, which upscales itself.
+    const up = q.get('up') || preset.up || 'fsr';
+    if (preset.scale < 1 && aa !== 'taau' && up === 'fsr') post.outputNode = fsr1(post.outputNode, Number(q.get('sharp') ?? 0.25));
+    window.aaMode = aa + (preset.scale < 1 && aa !== 'taau' && up === 'fsr' ? '+fsr' : '');
+    scenePass.setResolutionScale?.(preset.scale);
+    post.needsUpdate = true;
+}
+// post=0: no post chain at all. Render straight to a canvas of scale x the window and let the
+// browser's compositor stretch it (free); tone mapping happens inline in the materials.
+const DIRECT = (q.get('post') ?? preset.post) === '0' || (q.get('post') ?? preset.post) === 0;
+if (DIRECT) {
+    renderer.setPixelRatio(preset.scale);
+    renderer.setSize(W(), H(), true);
+    window.aaMode = 'direct';
+} else setupPost();
+// zpre=1: depth pre-pass (direct mode). Sponza is a few huge draw calls, so front-to-back sorting
+// can't stop the heavy PBR shader running on pixels that end up hidden; laying down depth first
+// with a trivial shader, then shading with depthFunc <= and no depth writes, shades each pixel
+// once. Alpha-tested materials (leaves, chains) skip the pre-pass and draw normally.
+const ZPRE = DIRECT && (q.get('zpre') ?? preset.zpre ?? '0') === '1';
+// Pushed back a hair: the pre-pass shader's depth is not bit-identical to the PBR pass's (and MSAA
+// widens the gap at edges), so without an offset some shaded pixels fail <= and stay black.
+const depthMat = (side) => new THREE.MeshBasicNodeMaterial({ colorWrite: false, side, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 2 });
+// One depth material per face-culling mode, matching each mesh's own: a front-only pre-pass misses
+// the double-sided surfaces' back faces, and whatever lies behind them then shows through
+// (light "leaking" through the arch undersides).
+const depthBySide = { [THREE.FrontSide]: depthMat(THREE.FrontSide), [THREE.BackSide]: depthMat(THREE.BackSide), [THREE.DoubleSide]: depthMat(THREE.DoubleSide) };
+const maskMeshes = [], opaqueMats = new Set(), opaqueMeshes = [];
+model.traverse((o) => { if (o.isMesh) { if (o.material.alphaTest > 0 || o.material.transparent) maskMeshes.push(o); else { opaqueMats.add(o.material); opaqueMeshes.push(o); } } });
+if (ZPRE) for (const m of opaqueMats) { m.depthFunc = THREE.LessEqualDepth; m.depthWrite = false; }
+function drawDirect() {
+    if (!ZPRE) return renderer.render(scene, camera);
+    const vis = [sky.visible, whoopG.visible, race.group.visible];
+    sky.visible = false; whoopG.visible = false; race.group.visible = false; maskMeshes.forEach((m) => (m.visible = false));
+    for (const m of opaqueMeshes) { m.userData.mat = m.material; m.material = depthBySide[m.material.side]; }
+    renderer.render(scene, camera);
+    for (const m of opaqueMeshes) m.material = m.userData.mat; [sky.visible, whoopG.visible, race.group.visible] = vis; maskMeshes.forEach((m) => (m.visible = true));
+    renderer.autoClear = false;
+    renderer.render(scene, camera);
+    renderer.autoClear = true;
+}
+if (q.get('nrm')) opaqueMats.forEach((m) => { if (m.normalMap) { m.normalScale.setScalar(Number(q.get('nrm'))); if (q.get('nrm') === '0') { m.normalMap = null; } m.needsUpdate = true; } });
+if (q.get('holes') === '1') { sky.visible = false; scene.background = new THREE.Color(0xff00ff); }
+window.sides = opaqueMeshes.reduce((a, m) => ((a[m.material.side] = (a[m.material.side] || 0) + 1), a), {});
+const draw = () => (DIRECT ? drawDirect() : post.render());
+addEventListener('resize', () => { if (q.get('w')) return; camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+msg.classList.add('hidden');
+const loadMs = Math.round(performance.now() - t0);
+const chase = new THREE.Vector3(), look = new THREE.Vector3(), fwd = new THREE.Vector3();
+function syncCamera(dt) {
+    const s = physics.getDroneState();
+    rig.position.copy(s.position); rig.quaternion.copy(s.quaternion);
+    whoopG.position.copy(s.position); whoopG.quaternion.copy(s.quaternion);
+    if (camMode === 'chase') {
+        fwd.set(0, 0, -1).applyQuaternion(rig.quaternion); fwd.y = 0; fwd.normalize();
+        chase.copy(rig.position).addScaledVector(fwd, -0.45).add({ x: 0, y: 0.15, z: 0 });
+        camera.position.lerp(chase, 1 - Math.exp(-dt / 0.08));
+        camera.lookAt(look.copy(rig.position).addScaledVector(fwd, 0.3));
+    }
+}
+
+// --- Cloth and leaves ---
+// Flying into a curtain or banner: the fabric wraps the ducts. Any contact drags hard on the
+// airframe (velocity and spin decay in ~0.1 s) and loads the props; a hit faster than 2.5 m/s, or
+// staying in it for 0.4 s, is a tangle: the whoop hangs in the cloth, props stalled, and resets
+// after a second. Leaves only drag (~0.35 s), and a little.
+const snag = { t: 0, hold: null, msgUntil: 0 }; let snagCount = 0;
+const _sp = new THREE.Vector3(), _st = {};
+function touching(tree, p, r) { if (!tree) return false; _sp.set(p.x, p.y, p.z); const h = tree.closestPointToPoint(_sp, _st, 0, r); return !!h && h.distance < r; }
+function updateSnag(dt, now) {
+    const b = physics.droneBody, p = b.position;
+    if (snag.hold) {
+        b.position.copy(snag.hold.pos); b.velocity.set(0, 0, 0); b.angularVelocity.scale(Math.exp(-dt / 0.05), b.angularVelocity);
+        if (now > snag.hold.until) { resetDrone(); snag.msgUntil = now + 800; snag.msg = 'RESET'; }
+        return;
+    }
+    if (touching(clothBVH, p, 0.06)) {
+        const speed = b.velocity.length();
+        if (snag.t === 0 && speed > 2.5 || snag.t > 0.4) { snagCount++; snag.hold = { pos: p.clone(), until: now + 1100 }; return; }
+        snag.t += dt;
+        const k = Math.exp(-dt / 0.1);
+        b.velocity.scale(k, b.velocity); b.angularVelocity.scale(k, b.angularVelocity);
+    } else snag.t = Math.max(0, snag.t - dt * 2);
+    if (touching(plantBVH, p, 0.06)) {
+        const k = Math.exp(-dt / 0.35);
+        b.velocity.scale(k, b.velocity);
+    }
+}
+
+// --- Loop ---
+let lastArmed = false;
+let last = performance.now(), frames = 0, fpsT = last, fps = 0;
+const frameTimes = [], gpuTimes = [];
+const mode = q.get('mode') || 'fly';
+if (mode === 'bench') {
+    // Scripted: a fixed camera path round the atrium (no physics), to time rendering only.
+    const N = Number(q.get('frames') || 240);
+    const phase = Number(q.get('phase') || 0);
+    const path = (t) => { const ang = (t + phase) * Math.PI * 2; return [Math.cos(ang) * 9, box.min.y + 1.2 + 4 * (0.5 - 0.5 * Math.cos(ang * 2)), Math.sin(ang) * 3.2]; };
+    camMode = 'free'; scene.add(camera); camera.rotation.set(0, 0, 0);
+    for (let i = 0; i < 30; i++) { draw(); await new Promise((r) => requestAnimationFrame(r)); }
+    const tS = performance.now(); let prev = tS;
+    for (let i = 0; i < N; i++) {
+        const [x, y, z] = path(i / N), [x2, y2, z2] = path((i + 3) / N);
+        camera.position.set(x, y, z); camera.lookAt(x2, y2, z2);
+        draw();
+        await new Promise((r) => requestAnimationFrame(r));
+        const now = performance.now(); frameTimes.push(now - prev); prev = now;
+        if (renderer.backend.trackTimestamp) { const g = await renderer.resolveTimestampsAsync('render'); if (g) gpuTimes.push(g); }
+    }
+    gpuTimes.sort((x, y) => x - y);
+    const gpu = gpuTimes.length ? { gpuP50: +gpuTimes[gpuTimes.length >> 1].toFixed(2), gpuP90: +gpuTimes[Math.floor(gpuTimes.length * 0.9)].toFixed(2), gpuN: gpuTimes.length } : { gpuN: 0 };
+    const spikes = frameTimes.map((t, i) => [i, Math.round(t)]).filter(([, t]) => t > 40);
+    frameTimes.sort((x, y) => x - y);
+    const avg = (performance.now() - tS) / N;
+    window.benchResult = { preset: q.get('q') || 'med', aa: window.aaMode, ...gpu, scale: preset.scale, w: renderer.domElement.width, h: renderer.domElement.height, fps: Math.round(1000 / avg * 10) / 10, p50: frameTimes[N >> 1].toFixed(1), p95: frameTimes[Math.floor(N * 0.95)].toFixed(1), loadMs, bvhMs, probeMs, dds: !!useDDS, spikes: spikes.slice(0, 30), nSpikes: spikes.length, adapter: renderer.backend.adapter?.info?.description || renderer.backend.adapter?.info?.vendor || '' };
+    hud.textContent = JSON.stringify(window.benchResult);
+} else {
+    const autolap = mode === 'autolap' && tt ? new Autopilot({ physics, gates: withFacing(SPONZA_TRACK.gates), normalOf: (g) => race.gates[SPONZA_TRACK.gates.findIndex((x) => x.name === g.name)].normal,
+        vmax: Number(q.get('vmax') || 3.6) }) : null;
+    if (autolap && q.get('rec') !== 'offline') startAudio();
+    if (autolap && q.get('rec')) hud.style.display = 'none';
+    // Clean plates for UI mockups: no HTML overlays (nohud=1), no path line (nopath=1).
+    if (q.get('nohud') === '1') { const st = document.createElement('style'); st.textContent = '#hud,#msg,#tt,#tt-arrow,#pilot-sticks,#pilot-cam,#pilot-status{display:none!important}'; document.head.appendChild(st); }
+    if (q.get('nopath') === '1' && tt) tt._path = () => {};
+    const auto = mode === 'flytest', track = []; let contacts = 0; const autoT0 = performance.now();
+    // Hover throttle for this airframe, from the thrust curve (thrust = T * mix(t, t^2, curve)).
+    const hoverT = (() => { const tw = 1 / ui.set.twr, c = physics.params.thrustCurve; let lo = 0, hi = 1; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; ((1 - c) * m + c * m * m < tw) ? lo = m : hi = m; } return lo; })();
+    // Shader warm-up: WebGPU builds a pipeline the first time each material is drawn, which stalls
+    // a frame or two - felt as stutter when new parts of the building swing into view. Draw one
+    // frame with nothing culled so everything is built before flight.
+    {
+        const culled = [];
+        scene.traverse((o) => { if (o.isMesh && o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
+        draw(); await new Promise((r) => requestAnimationFrame(r));
+        culled.forEach((o) => (o.frustumCulled = true));
+        last = performance.now(); fpsT = last;
+    }
+    // Dropped frames: a frame taking over 1.5 vsync intervals (~25 ms at 60 Hz). The fps average
+    // hides them, so the HUD counts them over the last 5 s.
+    const drops = [];
+    // Offline recording (mode=autolap&rec=offline): no live loop. The recorder calls recStep()
+    // once per video frame, which advances the sim by exactly 1/60 s and draws, so the video is
+    // smooth whatever this machine manages in real time. Sound is logged per frame (sticks,
+    // speed, race tones, speech) and rendered afterwards by recAudio() through an
+    // OfflineAudioContext with the same motor-sound engine.
+    const REC = q.get('rec') === 'offline' && autolap;
+    let recNow = autoT0;
+    const recLog = { frames: [], sfx: [], speech: [] };
+    const recT = () => (recNow - autoT0) / 1000;
+    if (REC && tt) {
+        for (const k of ['_tone', '_blip', '_buzz']) tt[k] = (...a) => recLog.sfx.push([recT(), k, a]);
+        window.ttSay = (text) => recLog.speech.push([recT(), text]);
+    }
+    const tick = (vnow) => {
+        const now = vnow ?? performance.now(), dt = REC ? 1 / 60 : Math.min((now - last) / 1000, 0.1);
+        if (now - last > 25) drops.push(now);
+        while (drops.length && drops[0] < now - 5000) drops.shift();
+        last = now;
+        let { axes, armed } = ui.update();
+        if (snag.hold || tt?.holding) axes = { ...axes, throttle: 0 };
+        if (autolap) {
+            // Demo flight (mode=autolap): arm, wait out the countdown, then the autopilot flies
+            // the course; the result comes 3 s after the finish.
+            const t = (now - autoT0) / 1000;
+            armed = t > 1.0;
+            if (!tt || tt.stage === 'idle' || tt.stage === 'countdown') axes = { throttle: 0, yaw: 0, pitch: 0, roll: 0 };
+            else { const a = autolap.update(dt); axes = a; autolap.maxErr = Math.max(autolap.maxErr || 0, a.err); }
+            if (physics._inContact && t > 1 && tt?.stage === 'racing') contacts++;
+            if (tt?.stage === 'racing' && now - autolap.lastNow > 25) autolap.long = (autolap.long || 0) + 1; autolap.lastNow = now;
+            if (tt?.stage === 'done') autolap.doneAt ??= t;
+            if (!window.benchResult && (autolap.doneAt && t > autolap.doneAt + 3 || t > Number(q.get('tEnd') || 120))) {
+                window.benchResult = { mode: 'autolap', stage: tt?.stage, laps: tt?.lapTimes, holeshot: tt?.holeshot, maxErr: +(autolap.maxErr || 0).toFixed(2), contactFrames: contacts, snags: snagCount, t: +t.toFixed(1), fps, longFrames: autolap.long || 0 };
+            }
+        }
+        if (auto) {
+            // Scripted test flight (mode=flytest): climb, hover, fly forward into the far wall.
+            const t = (now - autoT0) / 1000;
+            armed = t > 0.3;
+            const climb = Number(q.get('climb') || 1.2);
+            axes = { throttle: t < climb ? 0.75 : t < 2.5 ? hoverT : hoverT + 0.06, yaw: 0, pitch: t > 2.5 ? -0.18 : 0, roll: 0 };
+            const p = physics.droneBody.position;
+            track.push([+t.toFixed(2), +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)]);
+            if (physics._inContact) contacts++;
+            if (q.get('recoverAt') && t > Number(q.get('recoverAt')) && !window.recovered) {
+                const before = p.toArray().map((v) => +v.toFixed(2)); recoverDrone();
+                window.recovered = { t: +t.toFixed(2), before, after: physics.droneBody.position.toArray().map((v) => +v.toFixed(2)), safeN: safe.length };
+            }
+            if (t > Number(q.get('tEnd') || 9) && !window.benchResult) {
+                const inside = box.containsPoint(new THREE.Vector3(p.x, p.y, p.z));
+                const cb = clothG.length ? new THREE.Box3().setFromBufferAttribute(BufferGeometryUtils.mergeGeometries(clothG).attributes.position) : null;
+                window.benchResult = { mode: 'flytest', race: RACE && { ...race.status(), stage: tt?.stage, path: window.ttPath }, sides: window.sides, recovered: window.recovered, probeBox: window.probeBox, probeMs, inside, contacts, snagged: snagCount, cloth: cb && [cb.min.toArray().map((v) => +v.toFixed(1)), cb.max.toArray().map((v) => +v.toFixed(1))], maxY: Math.max(...track.map((r) => r[2])).toFixed(2), path: track.filter((_, i) => i % 30 === 0) };
+            }
+        }
+        physics.setInputs(axes, armed); lastArmed = armed;
+        physics.step(dt);
+        updateSnag(dt, now);
+        trackSafe(dt);
+        tt?.update(dt, now, physics.droneBody.position, armed);
+        syncCamera(dt);
+        autoExposure(dt);
+        if (audio.ctx) audio.update(axes, armed && !snag.hold, physics.droneBody.velocity.length(), camMode === 'fpv' ? 0 : 0.5);
+        draw();
+        frames++;
+        if (now - fpsT > 500) { fps = Math.round(frames * 1000 / (now - fpsT)); frames = 0; fpsT = now; }
+        const v = physics.droneBody.velocity.length();
+        hud.textContent = `${fps} fps  ${drops.length} drops/5s  ${q.get('q') || 'med'} ${lookName} x${preset.scale}  ${(v * 3.6).toFixed(0)} km/h  tilt ${uptilt}°\nEsc menu, Space reset, R recover, G look, ↑↓ tilt, C camera${audio.ctx ? '' : ', click for sound'}`;
+        ui.setStatus(snag.hold ? '<span class="warn">TANGLED IN CLOTH</span>' : now < snag.msgUntil ? `<span class="warn">${snag.msg || 'RESET'}</span>`
+            : lastArmed ? '<span class="armed">ARMED</span>' : '<span class="disarmed">DISARMED</span>');
+        if (REC) { recLog.frames.push([recT(), axes.throttle, axes.yaw, axes.pitch, axes.roll, armed && !snag.hold ? 1 : 0, physics.droneBody.velocity.length()]); ui.axes = axes; ui._draw(); }
+    };
+    if (REC) {
+        window.recStep = async () => {
+            recNow += 1000 / 60; tick(recNow);
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+            return window.benchResult ? 1 : 0;
+        };
+        window.recSpeechLog = () => recLog.speech;
+        window.recAudio = async () => {
+            const T = recLog.frames.at(-1)[0] + 1.5, SR = 48000;
+            const off = new OfflineAudioContext(2, Math.ceil(SR * T), SR);
+            off.resume = () => Promise.resolve(); // the engine resumes "suspended" contexts
+            const A = new AudioEngine(), Live = window.AudioContext;
+            window.AudioContext = function () { return off; }; A.start(); window.AudioContext = Live;
+            const sfx = recLog.sfx.slice(); let si = 0;
+            const proto = TimeTrial.prototype, self = { getAudio: () => off };
+            const resume = OfflineAudioContext.prototype.resume;
+            const byQ = new Map();
+            for (const f of recLog.frames) { const qn = Math.max(1, Math.round(f[0] * SR / 128)); if (!byQ.has(qn)) byQ.set(qn, f); }
+            for (const [qn, f] of byQ) {
+                off.suspend(qn * 128 / SR).then(() => {
+                    A.update({ throttle: f[1], yaw: f[2], pitch: f[3], roll: f[4] }, !!f[5], f[6], 0);
+                    while (si < sfx.length && sfx[si][0] <= f[0]) { const [, k, a] = sfx[si++]; proto[k].apply(self, a); }
+                    return resume.call(off);
+                });
+            }
+            const buf = await off.startRendering();
+            // 16-bit PCM WAV, base64.
+            const n = buf.length, L = buf.getChannelData(0), R = buf.getChannelData(1), out = new DataView(new ArrayBuffer(44 + n * 4));
+            const w = (o, str) => { for (let i = 0; i < str.length; i++) out.setUint8(o + i, str.charCodeAt(i)); };
+            w(0, 'RIFF'); out.setUint32(4, 36 + n * 4, true); w(8, 'WAVEfmt '); out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 2, true);
+            out.setUint32(24, SR, true); out.setUint32(28, SR * 4, true); out.setUint16(32, 4, true); out.setUint16(34, 16, true); w(36, 'data'); out.setUint32(40, n * 4, true);
+            for (let i = 0; i < n; i++) { out.setInt16(44 + i * 4, Math.max(-1, Math.min(1, L[i])) * 32767, true); out.setInt16(46 + i * 4, Math.max(-1, Math.min(1, R[i])) * 32767, true); }
+            const bytes = new Uint8Array(out.buffer); let bin = '';
+            for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            return btoa(bin);
+        };
+        window.recSpeak = (text) => new Promise((res) => { try { const u = new SpeechSynthesisUtterance(text); u.rate = 1.1; u.onend = u.onerror = () => res(speechSynthesis.getVoices().length); speechSynthesis.speak(u); setTimeout(() => res(-1), 8000); } catch { res(-2); } });
+        window.recReady = true;
+    } else renderer.setAnimationLoop(() => tick());
+    window.sim = { renderer, scene, camera, physics, input, post, sun, ui, snag };
+}
+</script>
+</body>
+</html>
