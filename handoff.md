@@ -18,7 +18,7 @@ the airframe to a fixed spec and times laps round a gated course, with a persist
   be fetched from unpkg, which meant the simulator could not run offline and went dark whenever
   unpkg did. Refresh them with `node tools/vendor-deps.mjs --force`; the pinned versions live in
   that script.
-* **Rendering:** Three.js `0.160.0`
+* **Rendering:** Three.js `0.187.0`
 * **Physics:** Cannon-es `0.20.0` — integration only; contacts are custom (see below)
 * **Collision geometry:** three-mesh-bvh `0.7.3`
 * **Audio:** Web Audio API, fully synthesised

@@ -62,7 +62,9 @@ export class Renderer {
         // this pixel density - and framerate is what a pilot actually feels.
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
         this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        // PCFShadowMap has been soft since r182, which deprecated PCFSoftShadowMap for
+        // WebGLRenderer (r187 warns and falls back to this).
+        this.renderer.shadowMap.type = THREE.PCFShadowMap;
         this.container.appendChild(this.renderer.domElement);
 
         // Lighting
