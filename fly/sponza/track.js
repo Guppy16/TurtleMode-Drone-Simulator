@@ -14,31 +14,40 @@
 //   wide (sill 4.06, top 6.33); window gates sit in their centres within 25 deg of square.
 //   The south side is plain corridor. The only sharp turns are the gallery's four corners
 //   (2.6-3 m wide).
-// - Square gates (MultiGP gates are square; 483 mm for Tiny Whutt): 1 m opening (easier than
-//   real whoop gates, which are ~0.5 m), flown one way. A gate faces along `yaw` / `pitch` if given (tracks.js convention), otherwise from
+// - Gates are wide rectangles, flown one way: each spans its corridor (width `w`, the corridor
+//   less ~10 cm a side and the 27 mm frame bars, so the frame never touches a wall or column)
+//   and as tall as the clear height there (floor or parapet to the lowest point of the vault
+//   or arch across its width, less ~10 cm); w x h is the opening, the bars sit outside it. The
+//   window gates fill their arched 1.1 m windows; the sunlit gate over the courtyard is 3 m tall.
+//   Sizes from ?mode=survey&gates=1&fit=1. `y` is the flown line's height through the gate,
+//   `fy` the frame's centre (the opening reaches well above and below the line). Corridor widths are the surveyed walls
+//   above; ?mode=survey&gates=1 checks the clearance round every frame. A gate faces along `yaw` / `pitch` if given (tracks.js convention), otherwise from
 //   the previous gate towards the next.
 // - `via`: points the flown line passes before reaching a gate (corners), so the path drawn
 //   ahead and the clearance check follow the corridors instead of cutting the columns.
-// - Runs: 3 laps; the lap clock starts at the first start/finish crossing.
+// - Runs: 2 laps; the lap clock starts at the first start/finish crossing.
 // Coordinates: world x, y, z in metres.
 export const SPONZA_TRACK = {
     id: 'sponza-gallery',
     name: 'Sponza Gallery',
-    gateRadius: 0.5, // half the square opening (1 m)
+    gateRadius: 0.5, // half the default opening (1 m); gates give their own w x h
     square: true,
     directional: true,
-    laps: 3,
+    laps: 2,
     gates: [
-        { name: 'Start', x: -6.5, y: 4.32, z: 3.3, yaw: 90, via: [[-9.5, 4.32, 2.9], [-8.2, 4.32, 3.3]] },
-        { name: 'Window out', x: -2.77, y: 4.9, z: 1.7, yaw: 25 },
-        { name: 'Sunlit run', x: 0.19, y: 4.9, z: 0.3, yaw: 90 },
-        { name: 'Window in', x: 3.15, y: 4.9, z: 1.7, yaw: 155, via: [[2.0, 4.9, 0.5]] },
-        { name: 'East', x: 8.86, y: 4.32, z: 0.0, yaw: 0, via: [[6.0, 4.4, 3.3], [8.6, 4.32, 2.9]] },
-        { name: 'South', x: 2.0, y: 4.32, z: -3.7, yaw: 270, via: [[8.6, 4.32, -3.2], [6.5, 4.32, -3.7]] },
-        { name: 'South 2', x: -4.5, y: 4.32, z: -3.7, yaw: 270 },
-        { name: 'West', x: -9.78, y: 4.32, z: 0.0, yaw: 180, via: [[-7.8, 4.32, -3.7], [-9.5, 4.32, -3.2]] },
+        { name: 'Start', x: -6.5, y: 4.32, fy: 5.13, z: 3.3, yaw: 90, w: 2.3, h: 3.25, via: [[-9.5, 4.32, 2.9], [-8.2, 4.32, 3.3]] },
+        { name: 'Window out', x: -2.74, y: 4.9, fy: 5.0, z: 1.71, yaw: 25, w: 0.6, h: 1.55 },
+        { name: 'Sunlit run', x: 0.19, y: 4.9, fy: 4.9, z: 0.03, yaw: 90, w: 2.2, h: 3.0 },
+        { name: 'Window in', x: 3.14, y: 4.9, fy: 5.04, z: 1.7, yaw: 155, w: 0.6, h: 1.6, via: [[2.0, 4.9, 0.5]] },
+        { name: 'East', x: 8.86, y: 4.32, fy: 5.08, z: 0.0, yaw: 0, w: 2.7, h: 3.26, via: [[6.0, 4.4, 3.3], [8.6, 4.32, 2.9]] },
+        { name: 'South', x: 2.0, y: 4.32, fy: 5.04, z: -3.86, yaw: 270, w: 1.95, h: 3.17, via: [[8.6, 4.32, -3.2], [6.5, 4.32, -3.7]] },
+        { name: 'South 2', x: -4.5, y: 4.32, fy: 4.76, z: -3.86, yaw: 270, w: 1.95, h: 2.61 },
+        { name: 'West', x: -9.81, y: 4.32, fy: 5.1, z: 0.0, yaw: 180, w: 2.55, h: 3.23, via: [[-7.8, 4.32, -3.7], [-9.5, 4.32, -3.2]] },
     ],
 };
+// The gallery's surveyed outline (from the numbers above), for the HUD's top-down plan: the ring's
+// outer walls and the opening over the courtyard. x, z in metres.
+export const SPONZA_PLAN = { x: [-11.25, 10.4], z: [-5.1, 4.6], opening: { x: [-7.6, 6.7], z: [-1.3, 1.3] } };
 // Start: on the gallery floor at the north-west corner, facing along the north walkway.
 export const SPONZA_TRACK_SPAWN = { x: -9.4, y: 3.32, z: 3.3, yaw: 90 };
 

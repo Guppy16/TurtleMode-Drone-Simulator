@@ -26,18 +26,42 @@ export function rateAt(x, { center, max, expo }) {
     return (center * e) / (1 - a * sr);
 }
 
+// Throttle curve, like Betaflight's thr_mid or an EdgeTX curve: stick 0 -> 0, stick `hs` (the
+// Hover throttle setting) -> `hp` (the command that hovers the airframe), 1 -> 1. A monotone cubic
+// through the three points (Fritsch-Butland slopes): smooth, no kink, never runs backwards. It
+// keeps the physics' thrust-to-weight real while hover sits low on the stick, with most of the
+// stick above it. inv() is its inverse (the autopilot thinks in motor commands).
+export function throttleCurve(hs, hp) {
+    const d0 = hp / hs, d1 = (1 - hp) / (1 - hs), m1 = 2 * d0 * d1 / (d0 + d1);
+    const m0 = Math.max(0, (3 * d0 - m1) / 2), m2 = Math.max(0, (3 * d1 - m1) / 2);
+    const herm = (x, x0, x1, y0, y1, s0, s1) => {
+        const h = x1 - x0, t = (x - x0) / h, t2 = t * t, t3 = t2 * t;
+        return (2 * t3 - 3 * t2 + 1) * y0 + (t3 - 2 * t2 + t) * h * s0 + (-2 * t3 + 3 * t2) * y1 + (t3 - t2) * h * s1;
+    };
+    const map = (s) => { s = Math.min(1, Math.max(0, s)); return s <= hs ? herm(s, 0, hs, 0, hp, m0, m1) : herm(s, hs, 1, hp, 1, m1, m2); };
+    const inv = (y) => { let lo = 0, hi = 1; for (let i = 0; i < 30; i++) { const m = (lo + hi) / 2; (map(m) < y ? lo = m : hi = m); } return (lo + hi) / 2; };
+    return { map, inv };
+}
+
 // Flight settings with tiny-whoop defaults (1S, 65 mm, ducted, ~32 g).
 export const SETTINGS = [
     // key, label, min, max, step, default, unit
-    ['twr', 'Thrust/weight', 1.6, 5, 0.1, 2.3, ''],
-    ['speed', 'Top speed', 3, 20, 0.5, 6.5, 'm/s'],
+    ['twr', 'Thrust/weight', 1.6, 5, 0.1, 3.4, ''],
+    ['topSpeed', 'Top speed', 15, 80, 1, 36, 'km/h'],
+    ['hover', 'Hover throttle', 10, 60, 1, 20, '%'],
     ['uptilt', 'Camera uptilt', 0, 50, 1, 15, 'deg'],
+    ['sticks', 'Stick overlay', 0, 1, 1, 0, ''],
 ];
 // Per-axis rate settings: rollCenter, rollMax, rollExpo, pitchCenter, ..., yawExpo.
-export const RATE_FIELDS = [['Center', 'Center', 10, 400, 5, 130], ['Max', 'Max', 100, 1200, 10, 520], ['Expo', 'Expo', 0, 1, 0.05, 0.45]];
+export const RATE_FIELDS = [['Center', 'Center', 10, 400, 5, 70], ['Max', 'Max', 100, 1200, 10, 450], ['Expo', 'Expo', 0, 1, 0.05, 0.3]];
 const rk = (axis, f) => axis + f; // 'roll' + 'Center'
+// Default Actual rates, soft enough to react with indoors: roll and pitch 70 deg/s centre, 450 max,
+// expo 0.3; yaw 60 / 300 / 0.2.
 const RATE_DEFAULTS = {};
-for (const [axis] of AXES) for (const [f, , , , , d] of RATE_FIELDS) RATE_DEFAULTS[rk(axis, f)] = axis === 'yaw' && f === 'Max' ? 380 : d;
+const RATE_DEF = { roll: [70, 450, 0.3], pitch: [70, 450, 0.3], yaw: [60, 300, 0.2] };
+for (const [axis] of AXES) RATE_FIELDS.forEach(([f], i) => (RATE_DEFAULTS[rk(axis, f)] = RATE_DEF[axis][i]));
+// The previous defaults: an axis still on them moves to the new ones; customised axes are kept.
+const RATE_OLD = { roll: [130, 520, 0.45], pitch: [130, 520, 0.45], yaw: [130, 380, 0.45] };
 export const rates = (set) => Object.fromEntries(AXES.map(([axis]) => [axis, { center: set[rk(axis, 'Center')], max: set[rk(axis, 'Max')], expo: set[rk(axis, 'Expo')] }]));
 
 // Settings saved before the per-axis rates: rate (roll and pitch max), yawRate, center, expo.
@@ -53,9 +77,13 @@ function loadSettings() {
     }
     if (saved.rate !== undefined) set.rollMax = set.pitchMax = saved.rate;
     if (saved.yawRate !== undefined) set.yawMax = saved.yawRate;
-    // Earlier defaults (TWR 2.8, 10 m/s) were too quick indoors; move them over if never changed.
-    if (saved.twr === 2.8) delete saved.twr;
-    if (saved.speed === 10) delete saved.speed;
+    // Earlier TWR defaults (2.8, then 2.3, which needed ~75% stick to lift off) move over if never
+    // changed.
+    if (saved.twr === 2.8 || saved.twr === 2.3) delete saved.twr;
+    // 'speed' was the prop pitch speed in m/s; the Top speed setting is now 'topSpeed', the level top
+    // speed in km/h, so the old value no longer applies.
+    delete saved.speed;
+    for (const [axis] of AXES) if (RATE_FIELDS.every(([f], i) => saved[rk(axis, f)] === RATE_OLD[axis][i])) RATE_FIELDS.forEach(([f]) => delete saved[rk(axis, f)]);
     for (const k of Object.keys(set)) if (typeof saved[k] === 'number' && Number.isFinite(saved[k])) set[k] = saved[k];
     return set;
 }
@@ -73,91 +101,104 @@ function migrateV1() {
 }
 
 const CSS = `
-#pilot-panel { --bg: #212121; --hd: #2b2b2b; --in: #151515; --line: #3a3a3a; --fg: #f0f0f0; --dim: #aaa; --acc: #ffbb00; --ok: #3cb371;
+#pilot-panel { --bg: var(--hud-keyline); --hd: #202016; --in: #0d0d07; --line: rgba(163,193,173,.35); --fg: var(--hud-text); --dim: var(--hud-quiet); --acc: var(--hud-accent); --on-acc: var(--hud-keyline); --ok: var(--hud-good);
+  --btn: #2a2a20; --btn-hi: #36362a; --cell: #19190f;
   position: fixed; right: 12px; top: 12px; width: 580px; height: min(540px, calc(100vh - 24px)); display: none; flex-direction: column;
-  background: var(--bg); border: 1px solid #0c0c0c; border-radius: 2px; color: var(--fg); font: 12.5px/18px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg); border: 1px solid var(--hud-quiet); border-radius: 0; color: var(--fg); font: var(--hud-w-regular) 12.5px/18px var(--hud-font);
   font-variant-numeric: tabular-nums; color-scheme: dark; z-index: 20; }
 #pilot-panel.on { display: flex; }
 #pilot-panel * { box-sizing: border-box; }
-#pilot-panel header { display: flex; align-items: flex-end; gap: 2px; padding: 8px 8px 0; border-bottom: 2px solid var(--acc); flex: none; }
+#pilot-panel header { display: flex; align-items: flex-end; gap: 2px; padding: 8px 8px 0; border-bottom: 1px solid var(--line); flex: none; }
 #pilot-panel .tabs { display: flex; gap: 2px; flex: 1; }
-#pilot-panel .tabs button { height: 26px; padding: 0 18px; border: 0; border-radius: 0; background: #393b3a; color: var(--fg); font: 600 12.5px system-ui, sans-serif; cursor: pointer; }
-#pilot-panel .tabs button:hover { background: #4a4c4b; }
-#pilot-panel .tabs button.on { background: var(--acc); color: #1a1400; }
+#pilot-panel .tabs button { height: 26px; padding: 0 18px; border: 0; border-radius: 0; background: var(--btn); color: var(--fg); font: var(--hud-w-regular) 12.5px var(--hud-font); cursor: pointer; }
+#pilot-panel .tabs button:hover { background: var(--btn-hi); }
+#pilot-panel .tabs button.on { background: var(--acc); color: var(--on-acc); }
 #pilot-panel .x { height: 22px; margin-bottom: 2px; padding: 0 10px; }
 #pilot-panel .body { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+#pilot-panel .credit { flex: none; padding: 6px 10px 8px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11.5px; font-weight: var(--hud-w-light); }
+#pilot-panel .credit a { color: inherit; }
 #pilot-panel .pg { display: none; flex-direction: column; gap: 8px; } #pilot-panel .pg.on { display: flex; }
-#pilot-panel .box { background: #262626; border: 1px solid #1b1b1b; }
-#pilot-panel .hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 24px; padding: 0 8px; background: var(--hd); border-bottom: 1px solid #1b1b1b; color: var(--fg); font-size: 12px; }
+#pilot-panel .box { background: var(--cell); border: 1px solid var(--line); }
+#pilot-panel .hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 24px; padding: 0 8px; background: var(--hd); border-bottom: 1px solid var(--line); color: var(--fg); font-size: 12px; }
 #pilot-panel .hd .st { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#pilot-panel .hd .dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: #666; } #pilot-panel .hd .dot.on { background: var(--ok); }
+#pilot-panel .hd .dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: #555; } #pilot-panel .hd .dot.on { background: var(--ok); }
 #pilot-panel .in { padding: 8px; }
-#pilot-panel button.b { height: 24px; padding: 0 12px; border-radius: 2px; border: 1px solid #5a5a5a; background: #333; color: var(--fg); font: 12.5px system-ui, sans-serif; cursor: pointer; }
-#pilot-panel button.b:hover { background: #444; }
-#pilot-panel button.b.pri { background: var(--acc); border-color: var(--acc); color: #1a1400; font-weight: 600; }
-#pilot-panel button.b.pri:hover { background: #ffcc33; }
+#pilot-panel button.b { height: 24px; padding: 0 12px; border-radius: 0; border: 1px solid var(--line); background: var(--btn); color: var(--fg); font: var(--hud-w-regular) 12.5px var(--hud-font); cursor: pointer; }
+#pilot-panel button.b:hover { background: var(--btn-hi); }
+#pilot-panel button.b.pri { background: var(--acc); border-color: var(--acc); color: var(--on-acc); }
+#pilot-panel button.b.pri:hover { filter: brightness(1.12); }
 #pilot-panel button[hidden] { display: none; }
 #pilot-panel button:focus-visible, #pilot-panel input:focus-visible, #pilot-panel summary:focus-visible { outline: 1px solid var(--acc); outline-offset: 1px; }
 #pilot-panel .row { display: flex; gap: 8px; align-items: center; }
 #pilot-panel .row.r { justify-content: flex-end; }
 #pilot-panel .stepline { min-height: 36px; display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 #pilot-panel .cnt { color: var(--dim); white-space: nowrap; }
-#pilot-panel .prog { height: 3px; background: #333; margin: 0 0 8px; } #pilot-panel .prog i { display: block; height: 100%; width: 0; background: var(--acc); }
+#pilot-panel .prog { height: 3px; background: var(--btn); margin: 0 0 8px; } #pilot-panel .prog i { display: block; height: 100%; width: 0; background: var(--acc); }
 #pilot-panel .ch { display: grid; grid-template-columns: 84px 1fr 84px auto; gap: 8px; align-items: center; margin: 4px 0; min-height: 22px; }
-#pilot-panel .ch > b { text-align: right; font-weight: 700; }
+#pilot-panel .ch > b { text-align: right; font-weight: var(--hud-w-regular); }
 #pilot-panel .ch > em { font-style: normal; color: var(--dim); font-size: 11.5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-#pilot-panel .track { position: relative; height: 18px; border: 1px solid #555; border-radius: 3px; background: #1b1b1b; overflow: hidden; }
-#pilot-panel .track i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--c, #666); }
-#pilot-panel .track span { position: absolute; inset: 0; text-align: center; line-height: 16px; font-weight: 700; color: #fff; text-shadow: 0 0 3px #000, 0 0 2px #000; }
+#pilot-panel .track { position: relative; height: 18px; border: 1px solid var(--line); border-radius: 0; background: var(--in); overflow: hidden; }
+#pilot-panel .track i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--c, var(--hud-quiet)); }
+#pilot-panel .track span { position: absolute; inset: 0; text-align: center; line-height: 16px; color: #fff; text-shadow: 0 0 3px var(--hud-keyline), 0 0 2px var(--hud-keyline); }
 #pilot-panel details summary { cursor: pointer; padding: 0 8px; height: 24px; line-height: 24px; background: var(--hd); color: var(--fg); }
-#pilot-panel details[open] summary { border-bottom: 1px solid #1b1b1b; }
+#pilot-panel details[open] summary { border-bottom: 1px solid var(--line); }
 #pilot-panel table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-#pilot-panel th { height: 34px; font-weight: 400; text-align: center; color: var(--fg); background: #2b2b2b; border: 1px solid #1b1b1b; line-height: 15px; }
-#pilot-panel td { height: 32px; text-align: center; border: 1px solid #1b1b1b; }
-#pilot-panel td.lab { color: #101010; font-weight: 700; text-align: left; padding-left: 8px; background: var(--c); }
+#pilot-panel th { height: 34px; font-weight: 400; text-align: center; color: var(--fg); background: var(--hd); border: 1px solid var(--line); line-height: 15px; }
+#pilot-panel td { height: 32px; text-align: center; border: 1px solid var(--line); }
+#pilot-panel td.lab { color: var(--hud-keyline); text-align: left; padding-left: 8px; background: var(--c); }
 #pilot-panel td.n { font-weight: 400; }
 #pilot-panel th:first-child, #pilot-panel td.lab { width: 90px; }
-#pilot-panel input[type=number] { width: 72px; height: 22px; padding: 0 0 0 4px; text-align: center; border-radius: 2px; border: 1px solid #3c3c3c; background: #1b1b1b; color: #fff; font: 12.5px system-ui, sans-serif; font-variant-numeric: tabular-nums; }
-#pilot-panel input[type=number]:hover { border-color: #666; }
+#pilot-panel input[type=number] { width: 72px; height: 22px; padding: 0 0 0 4px; text-align: center; border-radius: 0; border: 1px solid var(--line); background: var(--in); color: #fff; font: 12.5px var(--hud-font); font-variant-numeric: tabular-nums; }
+#pilot-panel input[type=number]:hover { border-color: var(--hud-quiet); }
 #pilot-panel input[type=number]::-webkit-inner-spin-button { opacity: 1; height: 18px; }
-#pilot-panel canvas { width: 100%; height: 0; flex: 1; min-height: 160px; display: block; background: #1a1a1a; }
+#pilot-panel canvas { width: 100%; height: 0; flex: 1; min-height: 160px; display: block; background: var(--in); }
 #pilot-panel .pg[data-p=rates] { flex: 1; min-height: 0; } #pilot-panel .pg[data-p=rates] .box:last-child { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #pilot-panel .set { display: grid; grid-template-columns: 112px 1fr 72px 36px; gap: 8px; align-items: center; margin: 6px 0; }
-#pilot-panel .set > span:first-child { text-align: right; font-weight: 700; } #pilot-panel .set .u { color: var(--dim); }
-#pilot-panel input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; margin: 0; border-radius: 2px; cursor: pointer; background: linear-gradient(to right, var(--acc) var(--p, 50%), #444 var(--p, 50%)); }
-#pilot-panel input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 8px; height: 16px; border-radius: 2px; background: var(--acc); border: 1px solid #1a1400; }
+#pilot-panel .set > span:first-child { text-align: right; } #pilot-panel .set .u { color: var(--dim); }
+#pilot-panel input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; margin: 0; border-radius: 2px; cursor: pointer; background: linear-gradient(to right, var(--acc) var(--p, 50%), var(--btn-hi) var(--p, 50%)); }
+#pilot-panel input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 8px; height: 16px; border-radius: 2px; background: var(--acc); border: 1px solid var(--on-acc); }
 #pilot-panel .kg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 #pilot-panel .keys { width: 100%; }
 #pilot-panel .keys td { height: 28px; border: 0; text-align: left; padding: 0 0 0 8px; } #pilot-panel .keys td.k { width: 96px; text-align: right; padding: 0 0 0 0; white-space: nowrap; }
-#pilot-panel .keys tr:nth-child(even) td { background: rgba(255,255,255,.03); }
-#pilot-panel kbd { display: inline-block; min-width: 22px; height: 20px; line-height: 20px; padding: 0 6px; margin-left: 4px; text-align: center; font: 700 11.5px ui-monospace, Menlo, Consolas, monospace; border-radius: 2px; background: #3a3a3a; border-bottom: 2px solid #1c1c1c; color: #fff; }
+#pilot-panel .keys tr:nth-child(even) td { background: rgba(163,193,173,.05); }
+#pilot-panel kbd { display: inline-block; min-width: 22px; height: 20px; line-height: 20px; padding: 0 6px; margin-left: 4px; text-align: center; font: var(--hud-w-regular) 11.5px var(--hud-font); border-radius: 0; background: var(--btn); border: 1px solid var(--hud-quiet); color: #fff; }
 #pilot-panel button.s { height: 20px; padding: 0 7px; font-size: 11.5px; }
-#pilot-panel button.s.on { background: #5a4a10; border-color: var(--acc); color: #fff; }
+#pilot-panel button.s.on { background: var(--acc); border-color: var(--acc); color: var(--on-acc); }
 #pilot-panel .bt { display: flex; gap: 4px; justify-content: flex-end; min-width: 94px; }
-#pilot-panel .bind { width: 100%; } #pilot-panel .bind th { height: 26px; font-weight: 600; background: var(--hd); text-align: left; padding-left: 8px; }
-#pilot-panel .bind td { height: 30px; text-align: left; padding: 0 0 0 8px; } #pilot-panel .bind td.an { font-weight: 700; width: 120px; }
+#pilot-panel .bind { width: 100%; } #pilot-panel .bind th { height: 26px; font-weight: var(--hud-w-regular); background: var(--hd); text-align: left; padding-left: 8px; }
+#pilot-panel .bind td { height: 30px; text-align: left; padding: 0 0 0 8px; } #pilot-panel .bind td.an { width: 120px; }
 #pilot-panel .bind td.kk { width: 150px; white-space: nowrap; } #pilot-panel .bind .pc { white-space: nowrap; }
 #pilot-panel .bind .pt { display: inline-flex; gap: 4px; align-items: center; margin-right: 10px; } #pilot-panel .bind .pt i { font-style: normal; color: var(--dim); font-size: 11.5px; }
 #pilot-panel .bind .dimt { color: var(--dim); font-size: 11.5px; }
-#pilot-panel button.kc { min-width: 40px; height: 22px; padding: 0 7px; margin-right: 4px; border-radius: 2px; border: 1px solid #1c1c1c; border-bottom: 2px solid #1c1c1c; background: #3a3a3a; color: #fff; font: 700 11.5px ui-monospace, Menlo, Consolas, monospace; cursor: pointer; }
-#pilot-panel button.kc:hover:not(:disabled) { background: #4c4c4c; } #pilot-panel button.kc:disabled { color: #999; cursor: default; }
-#pilot-panel button.kc.wait { background: var(--acc); color: #1a1400; border-color: var(--acc); }
+#pilot-panel button.kc { min-width: 40px; height: 22px; padding: 0 7px; margin-right: 4px; border-radius: 0; border: 1px solid var(--hud-quiet); background: var(--btn); color: #fff; font: var(--hud-w-regular) 11.5px var(--hud-font); cursor: pointer; }
+#pilot-panel button.kc:hover:not(:disabled) { background: var(--btn-hi); } #pilot-panel button.kc:disabled { color: var(--hud-quiet); opacity: .6; cursor: default; }
+#pilot-panel button.kc.wait { background: var(--acc); color: var(--on-acc); border-color: var(--acc); }
 #pilot-panel tr.sel td.lab { box-shadow: inset 4px 0 0 #fff; } #pilot-panel td.lab { cursor: pointer; }
-#pilot-cam { position: fixed; left: calc(50% + 145px); bottom: 20px; width: 100px; height: 100px; pointer-events: none;
-  border: 1px solid rgba(255,255,255,.55); border-radius: 3px; background: rgba(8,10,14,.3); color: #fff; font: 700 15px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
-#pilot-cam svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-#pilot-cam .hz { stroke: rgba(255,255,255,.35); stroke-dasharray: 3 3; } #pilot-cam .q { fill: #fff; } #pilot-cam .duct { fill: none; stroke: #fff; stroke-width: 2; }
-#pilot-cam .fov { fill: rgba(255,255,255,.22); } #pilot-cam .ax { stroke: #fff; stroke-width: 1.5; } #pilot-cam .arc { fill: none; stroke: #fff; stroke-width: 1.5; }
-#pilot-cam b { position: absolute; right: 7px; top: 8px; } #pilot-cam small { position: absolute; left: 7px; top: 9px; font: 600 9px/1 system-ui, sans-serif; letter-spacing: .5px; color: rgba(255,255,255,.65); }
-#pilot-cam.hit { border-color: #ffbb00; } #pilot-cam.hit b, #pilot-cam.hit small { color: #ffbb00; } #pilot-cam.hit .ax, #pilot-cam.hit .arc { stroke: #ffbb00; } #pilot-cam.hit .fov { fill: rgba(255,187,0,.3); }
-#pilot-sticks { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); display: flex; gap: 30px; pointer-events: none; }
-#pilot-sticks .gimbal { width: 100px; height: 100px; border: 1px solid rgba(255,255,255,.55); border-radius: 3px; position: relative; background: rgba(8,10,14,.3); }
-#pilot-sticks .gimbal::before, #pilot-sticks .gimbal::after { content: ''; position: absolute; background: rgba(255,255,255,.2); }
-#pilot-sticks .gimbal::before { left: 50%; top: 8px; bottom: 8px; width: 1px; }
-#pilot-sticks .gimbal::after { top: 50%; left: 8px; right: 8px; height: 1px; }
-#pilot-sticks .dot { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: #fff; border: 2px solid rgba(0,0,0,.6); }
-#pilot-status { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); font: 700 18px/1 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; letter-spacing: .08em; text-shadow: 0 1px 4px #000; pointer-events: none; }
-#pilot-status .armed { color: #2fbf6a; } #pilot-status .disarmed { color: #ff5a4a; } #pilot-status .warn { color: #ffb000; }`;
+/* Bottom left, plate-less: km/h and the camera angle on one baseline (the angle mark's base line
+   on it too), which the stick gimbals' bottoms share. */
+#pilot-cam { position: fixed; left: var(--hud-m); bottom: calc(22 * var(--hud-u)); display: flex; align-items: baseline; gap: calc(22 * var(--hud-u)); pointer-events: none;
+  color: var(--hud-text); font-family: var(--hud-font); font-style: var(--hud-style); font-weight: var(--hud-w-regular); font-size: calc(20 * var(--hud-u)); line-height: 1;
+  font-variant-numeric: var(--hud-num); text-shadow: var(--hud-shadow); white-space: nowrap; }
+#pilot-cam #spd { position: static; }
+#pilot-cam .ang-wrap { display: flex; align-items: baseline; gap: calc(7 * var(--hud-u)); }
+#pilot-cam svg { width: calc(22 * var(--hud-u)); height: calc(17 * var(--hud-u)); fill: none; stroke: var(--hud-text); stroke-width: 2.4; stroke-linecap: round; overflow: visible;
+  filter: var(--hud-shadow-svg); position: relative; top: calc(1.7 * var(--hud-u)); }
+#pilot-cam.hit .ang-wrap { color: var(--hud-accent); } #pilot-cam.hit svg { stroke: var(--hud-accent); }
+/* Stick gimbals: square openings with a sage outline (shadowed, static), a cyan dot moved by
+   transform, and a short fading cyan trail drawn on a small canvas with its shadow baked in. */
+#pilot-sticks { position: fixed; left: 50%; bottom: calc(26 * var(--hud-u)); transform: translateX(-50%); display: flex; gap: calc(18 * var(--hud-u)); pointer-events: none;
+  transition: opacity .4s; }
+#pilot-sticks.idle { opacity: .35; } #pilot-sticks:not(.idle) { transition-duration: .08s; }
+#pilot-sticks .gimbal { position: relative; width: calc(60 * var(--hud-u)); height: calc(60 * var(--hud-u)); border-radius: var(--hud-r);
+  box-shadow: inset 0 0 0 calc(2.6 * var(--hud-u)) var(--hud-quiet), inset 0 0 0 calc(4.3 * var(--hud-u)) var(--hud-ring-shadow), 0 0 0 calc(1.7 * var(--hud-u)) var(--hud-ring-shadow); }
+#pilot-sticks canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#pilot-sticks .dot { position: absolute; left: 50%; top: 50%; width: calc(10 * var(--hud-u)); height: calc(10 * var(--hud-u)); margin: calc(-5 * var(--hud-u)) 0 0 calc(-5 * var(--hud-u));
+  border-radius: 50%; background: var(--hud-accent); box-shadow: 0 0 0 calc(1 * var(--hud-u)) var(--hud-keyline); will-change: transform; }
+#pilot-sticks.off { display: none; }
+#pilot-status { position: fixed; left: 0; right: 0; text-align: center; top: calc(132 * var(--hud-u)); font-family: var(--hud-font); font-style: var(--hud-style); font-weight: var(--hud-w-regular);
+  font-size: calc(18 * var(--hud-u)); line-height: calc(24 * var(--hud-u)); color: var(--hud-text); text-shadow: var(--hud-shadow); pointer-events: none; }
+#pilot-status .armed, #pilot-status .disarmed { text-shadow: var(--hud-shadow-strong); }
+#pilot-status .armed { color: var(--hud-good); } #pilot-status .disarmed { color: var(--hud-bad); } #pilot-status .warn { color: var(--hud-text); }`;
 
 const KB_KEY = 'tm.keymap.v1';
 // Keyboard bindings by physical key (KeyboardEvent.code). Rows with two slots: menu (Esc fixed, M),
@@ -234,7 +275,7 @@ export class PilotUI {
         const heads = ['Center sensitivity', 'Max rate', 'Expo'];
         const rows = AXES.map(([axis, name, c]) => `<tr data-ax="${axis}" style="--c:${c}"><td class="lab" title="Select to edit on the graph">${name.toUpperCase()}</td>${RATE_FIELDS.map(([f, , lo, hi, st]) => `<td><input type="number" data-k="${rk(axis, f)}" min="${lo}" max="${hi}" step="${st}"></td>`).join('')}<td class="n" data-m="${axis}"></td></tr>`).join('');
         p.innerHTML = `
-        <header><nav class="tabs">${TABS.map(([t, l]) => `<button data-t="${t}">${l}</button>`).join('')}</nav><button class="b x" data-a="close" title="Close (Esc or M)">Close (Esc)</button></header>
+        <header><nav class="tabs">${TABS.map(([t, l]) => `<button data-t="${t}">${l}</button>`).join('')}</nav><button class="b x" data-a="close" title="Resume (Esc or M)">Resume (Esc)</button></header>
         <div class="body">
           <section class="pg" data-p="controller">
             <div class="box"><div class="hd"><span>Radio</span><span class="st"><i class="dot"></i><span class="pd">No controller</span></span></div>
@@ -254,7 +295,8 @@ export class PilotUI {
           </section>
           <section class="pg" data-p="bindings"><div class="box"><table class="bind"><thead><tr><th>Action</th><th>Keyboard</th><th>Controller</th></tr></thead><tbody></tbody></table></div>
             <div class="row r"><button class="b" data-a="keydef">Reset keys</button></div></section>
-        </div>`;
+        </div>
+        <footer class="credit">Map: <a href="https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza" target="_blank" rel="noopener">Sponza by Crytek (Frank Meinl, after Marko Dabrovic), PBR textures by Alexandre Pestana</a></footer>`;
         document.body.append(p);
         this.panel = p; this.stepEl = p.querySelector('.stepline'); this.txtEl = p.querySelector('.txt'); this.cntEl = p.querySelector('.cnt'); this.progEl = p.querySelector('.prog i');
         this.axesEl = p.querySelector('.axes'); this.canvas = p.querySelector('canvas'); this.chansEl = p.querySelector('.chans'); this.bindBody = p.querySelector('.bind tbody');
@@ -295,32 +337,28 @@ export class PilotUI {
         this._tab(this.tab);
 
         const s = document.createElement('div'); s.id = 'pilot-sticks';
-        s.innerHTML = '<div class="gimbal"><div class="dot"></div></div><div class="gimbal"><div class="dot"></div></div>';
+        s.innerHTML = '<div class="gimbal"><canvas></canvas><div class="dot"></div></div><div class="gimbal"><canvas></canvas><div class="dot"></div></div>';
         document.body.append(s);
         this.dots = s.querySelectorAll('.dot');
+        this.sticksEl = s; this._dotsAt = [];
+        this._trails = [...s.querySelectorAll('canvas')].map((c) => ({ c, g: c.getContext('2d'), pts: [], drawn: false }));
         const cam = document.createElement('div'); cam.id = 'pilot-cam';
-        // Side view of the whoop (two ducts, canopy, camera at the front) with the camera's
-        // view cone drawn at the uptilt above the level line, as sims' camera-angle screens do.
-        cam.innerHTML = '<svg viewBox="0 0 100 100"><line class="hz" x1="52" y1="66" x2="96" y2="66"/>'
-            + '<path class="fov"/><line class="ax" x1="52" y1="66"/><path class="arc"/>'
-            + '<g transform="translate(52 66) scale(1.25) translate(-44 -66)"><rect class="duct" x="8" y="68" width="16" height="7" rx="2"/><rect class="duct" x="30" y="68" width="16" height="7" rx="2"/>'
-            + '<rect class="q" x="8" y="70.5" width="38" height="2"/><path class="q" d="M20 68 L24 61 H36 L40 68 Z"/><rect class="q" x="37" y="62" width="8" height="6" rx="1"/></g>'
-            + '</svg><small>CAM</small><b>0°</b>';
+        // Camera angle, as sims show it in a corner: an angle mark drawn at the uptilt, and the
+        // degrees. No label: the mark says what the number is. The speed readout (#spd) sits first.
+        cam.innerHTML = '<span class="ang-wrap"><svg viewBox="0 0 38 30"><path class="base" d="M3 27H35"/><path class="ax"/><path class="arc"/></svg><span></span></span>';
+        const spd = document.getElementById('spd'); if (spd) cam.prepend(spd);
         document.body.append(cam); this.camEl = cam; this._camUpdate(false);
         this.status = document.createElement('div'); this.status.id = 'pilot-status'; document.body.append(this.status);
     }
 
-    // Camera angle: the view cone at the uptilt; amber for a moment when it changes.
+    // Camera angle: the mark drawn at the uptilt and the degrees; accent colour for a moment when it changes.
     _camUpdate(flash) {
         const t = this.set.uptilt; this._camShown = t;
-        const C = [52, 66], r = (a, L) => [C[0] + L * Math.cos(a * Math.PI / 180), C[1] - L * Math.sin(a * Math.PI / 180)];
-        const f = (p) => p.map((v) => v.toFixed(1)).join(' ');
-        const half = 22; // about half the camera's vertical view
-        this.camEl.querySelector('.fov').setAttribute('d', `M${f(C)} L${f(r(t - half, 44))} A44 44 0 0 0 ${f(r(t + half, 44))} Z`);
-        const e = r(t, 42), ax = this.camEl.querySelector('.ax'); ax.setAttribute('x2', e[0].toFixed(1)); ax.setAttribute('y2', e[1].toFixed(1));
-        this.camEl.querySelector('.arc').setAttribute('d', t > 0.5 ? `M${f(r(0, 26))} A26 26 0 0 0 ${f(r(t, 26))}` : '');
-        this.camEl.querySelector('b').textContent = `${Math.round(t)}°`;
-        if (flash) { this.camEl.classList.add('hit'); clearTimeout(this._camT); this._camT = setTimeout(() => this.camEl.classList.remove('hit'), 1200); }
+        const a = t * Math.PI / 180, f = (v) => v.toFixed(1), r = 17;
+        this.camEl.querySelector('.ax').setAttribute('d', `M3 27L${f(3 + 32 * Math.cos(a))} ${f(27 - 32 * Math.sin(a))}`);
+        this.camEl.querySelector('.arc').setAttribute('d', t > 0.5 ? `M${3 + r} 27A${r} ${r} 0 0 0 ${f(3 + r * Math.cos(a))} ${f(27 - r * Math.sin(a))}` : '');
+        this.camEl.querySelector('.ang-wrap > span').textContent = `${Math.round(t)}°`;
+        if (flash) { this.camEl.classList.add('hit'); clearTimeout(this._camT); this._camT = setTimeout(() => this.camEl.classList.remove('hit'), 600); }
     }
 
     _tilt(d) {
@@ -329,6 +367,8 @@ export class PilotUI {
         if (this.tab === 'flight' && this.panel.classList.contains('on')) this._drawSets();
     }
 
+    // The menu is open: the sim pauses (index.html).
+    get paused() { return this.panel.classList.contains('on'); }
     _toggle() { if (this.panel.classList.contains('on')) this._close(); else { this.panel.classList.add('on'); if (this.tab === 'rates') this._rateView(); } }
     _close() { this._endBind(); this.cap = null; this._drawBindings(); this.panel.classList.remove('on'); if (this.panel.contains(document.activeElement)) document.activeElement.blur(); }
     _tab(t) {
@@ -446,7 +486,7 @@ export class PilotUI {
         this._gm = { W, H, top, X, Y };
         c.strokeStyle = '#8a8a8a'; c.lineWidth = 1;
         c.beginPath(); c.moveTo(0, Math.round(H / 2) + .5); c.lineTo(W, Math.round(H / 2) + .5); c.moveTo(Math.round(W / 2) + .5, 0); c.lineTo(Math.round(W / 2) + .5, H); c.stroke();
-        c.font = '11px system-ui, sans-serif'; c.fillStyle = '#8a8a8a'; c.textAlign = 'center'; c.textBaseline = 'top'; c.fillText(`${top} deg/s`, W / 2, 3);
+        c.font = '11px Ubuntu, system-ui, sans-serif'; c.fillStyle = '#8a8a8a'; c.textAlign = 'center'; c.textBaseline = 'top'; c.fillText(`${top} deg/s`, W / 2, 3);
         c.textBaseline = 'bottom'; c.fillText(`-${top} deg/s`, W / 2, H - 3);
         c.lineJoin = 'round';
         const sel = this.selAxis, order = [...AXES].reverse().sort((a, b) => (a[0] === sel) - (b[0] === sel));
@@ -458,7 +498,7 @@ export class PilotUI {
         c.globalAlpha = 1;
         // Chips: curve ends on the right, live stick values on the left.
         const chip = (txt, col, x, y, align) => {
-            c.font = '600 11px system-ui, sans-serif'; const w = c.measureText(txt).width + 12;
+            c.font = '11px Ubuntu, system-ui, sans-serif'; const w = c.measureText(txt).width + 12;
             const x0 = align === 'right' ? x - w : x; c.fillStyle = col; c.fillRect(x0, y, w, 16);
             c.fillStyle = '#111'; c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillText(txt, x0 + 6, y + 8.5);
         };
@@ -473,7 +513,7 @@ export class PilotUI {
         // Handles of the selected axis.
         const col = AXES.find(([a]) => a === sel)[2];
         this._hp = this._handles();
-        c.font = '10.5px system-ui, sans-serif'; c.textAlign = 'left'; c.textBaseline = 'middle';
+        c.font = '10.5px Ubuntu, system-ui, sans-serif'; c.textAlign = 'left'; c.textBaseline = 'middle';
         for (const [h, [px, py]] of Object.entries(this._hp)) {
             c.fillStyle = col; c.strokeStyle = '#fff'; c.lineWidth = 2; c.fillRect(px - 5, py - 5, 10, 10); c.strokeRect(px - 5, py - 5, 10, 10);
             c.fillStyle = '#d0d0d0'; c.fillText(h === 'max' ? 'Max' : h === 'center' ? 'Center' : 'Expo', h === 'max' ? px - 28 : px + 9, h === 'max' ? Math.max(8, py - 12) : py - 8);
@@ -530,7 +570,8 @@ export class PilotUI {
             l.innerHTML = `<span>${label}</span><input type="range" min="${min}" max="${max}" step="${step}"><input type="number" min="${min}" max="${max}" step="${step}"><span class="u">${unit}</span>`;
             const [rng, num] = l.querySelectorAll('input');
             if (k === 'uptilt') l.title = 'Also changes with the up and down arrow keys';
-            if (k === 'speed') l.title = 'Prop pitch speed: the airspeed where thrust fades out';
+            if (k === 'hover') l.title = 'Stick position that hovers (the throttle curve passes the hover command there)';
+            if (k === 'topSpeed') l.title = 'Level top speed at full throttle, as the speed readout shows it';
             const show = () => { rng.value = num.value = this.set[k]; rng.style.setProperty('--p', `${(this.set[k] - min) / (max - min) * 100}%`); };
             rng.oninput = () => { this.set[k] = Number(rng.value); show(); this._saveSet(); this._derived(); };
             num.oninput = () => { const v = parseFloat(num.value); if (!Number.isFinite(v)) return; this.set[k] = clamp(v, min, max); rng.value = this.set[k]; rng.style.setProperty('--p', `${(this.set[k] - min) / (max - min) * 100}%`); this._saveSet(); this._derived(); };
@@ -549,6 +590,14 @@ export class PilotUI {
         addEventListener('keydown', (e) => {
             if (this.cap) { e.preventDefault(); e.stopImmediatePropagation(); this._capKey(e); return; }
             if (this.bind && e.code === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); this._endBind(); return; }
+            // Tab / Shift+Tab cycle the menu's tabs while it is open (not the browser's focus jump);
+            // a key being captured for a binding is handled above, so Tab still binds there.
+            if (e.code === 'Tab' && this.paused && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                e.preventDefault(); e.stopImmediatePropagation();
+                const i = TABS.findIndex(([t]) => t === this.tab), n = TABS.length;
+                this._tab(TABS[(i + (e.shiftKey ? n - 1 : 1)) % n][0]);
+                return;
+            }
             if (e.target.closest?.('#pilot-panel') || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
             const hit = this._findKey(e.code);
             if (!hit) { if (LEGACY.has(e.code)) e.stopImmediatePropagation(); return; }
@@ -682,13 +731,56 @@ export class PilotUI {
         return { axes, armed };
     }
 
-    _draw(g) {
+    // Stick trail: a tapered cyan swoosh (1u at the tail to 7u at the head, alpha .15 to 1) over a
+    // wider near-black one, so the shadow is baked into the canvas and nothing on a moving layer
+    // is filtered. Redrawn only while the last 400 ms hold two or more distinct points.
+    _trail(T, x, y, now, u, w) {
+        const pts = T.pts, last = pts[pts.length - 1];
+        if (!last || Math.abs(last.x - x) > 0.004 || Math.abs(last.y - y) > 0.004) pts.push({ x, y, t: now }); else last.t = now;
+        while (pts.length && now - pts[0].t > 400) pts.shift();
+        const live = pts.length >= 2;
+        if (!live && !T.drawn) return;
+        const c = T.c, dpr = devicePixelRatio || 1, px = Math.round(60 * u * dpr);
+        if (c.width !== px) c.width = c.height = px;
+        const G = T.g; G.setTransform(1, 0, 0, 1, 0, 0); G.clearRect(0, 0, px, px); T.drawn = live;
+        if (!live) return;
+        if (!T.cyan) { const st = getComputedStyle(document.documentElement); T.cyan = st.getPropertyValue('--hud-accent').trim(); T.dark = st.getPropertyValue('--hud-keyline').trim(); }
+        G.setTransform(dpr, 0, 0, dpr, 30 * u * dpr, 30 * u * dpr); G.lineCap = 'round';
+        for (const [col, w0, w1, a1] of [[T.dark, 2, 10, 0.55], [T.cyan, 1, 7, 1]]) {
+            G.strokeStyle = col;
+            for (let i = 1; i < pts.length; i++) {
+                const k = 1 - (now - pts[i].t) / 400; if (k <= 0) continue;
+                G.globalAlpha = a1 * (0.15 + 0.85 * k); G.lineWidth = (w0 + (w1 - w0) * k) * u;
+                G.beginPath(); G.moveTo(pts[i - 1].x * w, -pts[i - 1].y * w); G.lineTo(pts[i].x * w, -pts[i].y * w); G.stroke();
+            }
+        }
+        G.globalAlpha = 1;
+    }
+
+    _draw(g, now = this.now ?? performance.now()) {
         // Mode 2: left = yaw (x) / throttle (y), right = roll (x) / pitch (y, forward = up).
-        const a = this.axes, put = (el, x, y) => { el.style.left = `${50 + x * 44}%`; el.style.top = `${50 - y * 44}%`; };
-        put(this.dots[0], a.yaw, a.throttle * 2 - 1);
-        put(this.dots[1], a.roll, -a.pitch);
+        // Stick gimbals (mode 2: left throttle/yaw, right pitch/roll): a dot in each square, off
+        // unless the Stick overlay setting is on; moved by transform, on change only. The dot
+        // travels the whole square (inside the outline); the trail is the last 400 ms.
+        // (stickAxes: a demo flight's own sticks, shown in place of the live ones.)
+        const a = this.stickAxes ?? this.axes, show = this.set.sticks >= 1;
+        if (show !== this._sticksOn) { this._sticksOn = show; this.sticksEl.classList.toggle('off', !show); }
+        if (show) {
+            const u = Math.min(innerWidth / 1280, innerHeight / 720), w = 21.4 * u; // 30u half-width - 2.6u outline - 6u dot
+            const put = (i, x, y) => {
+                const tf = `translate(${(x * w).toFixed(1)}px,${(-y * w).toFixed(1)}px)`;
+                if (this._dotsAt[i] !== tf) { this._dotsAt[i] = tf; this.dots[i].style.transform = tf; this._movedAt = now; }
+                this._trail(this._trails[i], x, y, now, u, w);
+            };
+            put(0, a.yaw, a.throttle * 2 - 1); put(1, a.roll, -a.pitch);
+            // Untouched for 1.5 s: the sticks dim (CSS fades them; back at once on any move).
+            const idle = now - (this._movedAt ?? -1e9) > 1500;
+            if (idle !== this._sticksIdle) { this._sticksIdle = idle; this.sticksEl.classList.toggle('idle', idle); }
+        }
         if (!this.panel.classList.contains('on')) return;
-        if (this.tab === 'rates') this._graph();
+        // The rates graph shows the live sticks: redraw only when they move (settings changes
+        // redraw it directly).
+        if (this.tab === 'rates') { const k = `${a.roll.toFixed(2)},${a.pitch.toFixed(2)},${a.yaw.toFixed(2)}`; if (k !== this._graphAt) { this._graphAt = k; this._graph(); } }
         if (this.tab !== 'controller') return;
         const m = this.map || {};
         const setCh = (k, us, frac) => {
@@ -704,7 +796,7 @@ export class PilotUI {
         if (pad !== this._padTxt) { this.padTxt.textContent = pad; this.padDot.classList.toggle('on', !!g); this._padTxt = pad; }
         if (!g) { if (this.axesEl.children.length) this.axesEl.innerHTML = ''; return; }
         if (this.axesEl.children.length !== g.axes.length) {
-            this.axesEl.innerHTML = g.axes.map((_, k) => `<div class="ch" style="--c:#8a8a8a"><b>Axis ${k}</b><div class="track"><i></i><span></span></div><em></em><span></span></div>`).join('');
+            this.axesEl.innerHTML = g.axes.map((_, k) => `<div class="ch" style="--c:var(--hud-quiet)"><b>Axis ${k}</b><div class="track"><i></i><span></span></div><em></em><span></span></div>`).join('');
         }
         const roles = (k) => Object.entries(m).filter(([, s]) => s.axis === k).map(([r]) => r).join(' ');
         g.axes.forEach((v, k) => {
@@ -714,5 +806,8 @@ export class PilotUI {
         });
     }
 
-    setStatus(html) { this.status.innerHTML = html; }
+    // The key bound to an action, for on-screen hints ('' if none, or if a radio switch does it).
+    keyLabel(id) { if (this.map?.[id]) return ''; const c = this.kb[id]?.find((k) => k); return c ? keyName(c) : ''; }
+
+    setStatus(html) { if (html !== this._status) { this._status = html; this.status.innerHTML = html; } }
 }

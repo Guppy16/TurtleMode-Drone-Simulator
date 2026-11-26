@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- Credits: Sponza by Crytek (Frank Meinl, after Marko Dabrovic), PBR textures by Alexandre Pestana. https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza -->
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -7,10 +8,124 @@
     <style>
         html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px/1.4 ui-monospace, Menlo, monospace; color: #fff; }
         canvas { display: block; }
-        #hud { position: fixed; left: 10px; top: 8px; white-space: pre; text-shadow: 0 1px 2px #000; pointer-events: none; }
+        /* The HUD's look in one place: every font and colour the in-game HUD uses (timetrial.js,
+           controls.js). In-world gate and path colours are GATE_COLOURS in timetrial.js. Sizes
+           are in --hud-u, one 1280x720 pixel scaled to the window. The look is the Cambridge
+           University Drone Society brand: Ubuntu (fonts/, Ubuntu Font Licence), near-black plates,
+           cyan and sage. */
+        @font-face { font-family: 'Ubuntu'; font-weight: 300; font-style: normal; font-display: block; src: url(fonts/Ubuntu-Light.ttf) format('truetype'); }
+        @font-face { font-family: 'Ubuntu'; font-weight: 400; font-style: normal; font-display: block; src: url(fonts/Ubuntu-Regular.ttf) format('truetype'); }
+        :root {
+            --hud-u: min(calc(100vw / 1280), calc(100vh / 720));
+            --hud-font: 'Ubuntu', system-ui, sans-serif;
+            --hud-style: normal;
+            --hud-w-light: 300; --hud-w-regular: 400;
+            --hud-num: tabular-nums lining-nums;
+            --hud-text: #fff;
+            --hud-accent: #00d3f0;              /* cyan: the next gate, key highlights, best lap */
+            --hud-quiet: #a3c1ad;               /* sage: quiet info (labels, previous best, icons) */
+            --hud-keyline: #14140a;             /* near-black keylines */
+            --hud-plate: rgba(20,20,10,.80);    /* plates: only the clock + delta and the lap result */
+            --hud-r: calc(3 * var(--hud-u));    /* plate corner radius (and the stick gimbals') */
+            --hud-div: rgba(163,193,173,.28);   /* the divider between a plate's rows */
+            /* Everything else is plate-less: white type held by a near-black shadow (a 1u hairline,
+               a 1u drop and a faint 7u falloff), denser for the coloured deltas. */
+            --hud-shadow: 0 0 calc(1 * var(--hud-u)) rgba(20,20,10,.9), 0 calc(1 * var(--hud-u)) calc(2 * var(--hud-u)) rgba(20,20,10,.75),
+                0 0 calc(7 * var(--hud-u)) rgba(20,20,10,.35);
+            --hud-shadow-strong: 0 0 calc(1 * var(--hud-u)) rgba(20,20,10,.95), 0 0 calc(2 * var(--hud-u)) rgba(20,20,10,.8),
+                0 calc(1 * var(--hud-u)) calc(2 * var(--hud-u)) rgba(20,20,10,.75), 0 0 calc(8 * var(--hud-u)) rgba(20,20,10,.4);
+            --hud-shadow-svg: drop-shadow(0 0 1px rgba(20,20,10,.9)) drop-shadow(0 1px 2px rgba(20,20,10,.6));
+            --hud-ring-shadow: rgba(20,20,10,.6); /* under the stick gimbal outline and the trail */
+            /* Layout grid: screen margin, and the timing column's left edge (the clock is centred). */
+            --hud-m: calc(28 * var(--hud-u));
+            --hud-col: calc(50% - 62 * var(--hud-u));
+            --hud-panel: rgba(20,20,10,.84);    /* the finish screen's side panel */
+            --hud-dim: rgba(0,0,0,.45);         /* dims the scene behind the finish screen */
+            --hud-good: #8bd74a;                /* delta: ahead */
+            --hud-bad: #ff6b57;                 /* delta: behind */
+            --hud-track: rgba(255,255,255,.2);
+            --hud-plan-wall: rgba(163,193,173,.5);
+            --hud-plan-gate: #fff;
+            --hud-plan-start: #fff;
+            --hud-plan-line: #fff;
+            --hud-debug: rgba(255,255,255,.55);
+            --hud-dim-text: rgba(255,255,255,.85); /* the fps readout */
+            --hud-title-shadow: 0 1px 2px rgba(0,0,0,.75), 0 0 10px rgba(0,0,0,.45); /* the plate-less title card */
+        }
+        /* Plate-less readouts: fps top right (its baseline on the clock's), speed in the camera-angle
+           module bottom left (controls.js #pilot-cam), and a brief toast for arm / reset / recover
+           under the clock plate. */
+        #hud, #spd, #toast { position: fixed; pointer-events: none; white-space: nowrap; font-family: var(--hud-font); font-style: var(--hud-style);
+            font-variant-numeric: var(--hud-num); font-weight: var(--hud-w-regular); color: var(--hud-text); text-shadow: var(--hud-shadow); }
+        #hud { right: var(--hud-m); top: calc(44 * var(--hud-u)); font-size: calc(16 * var(--hud-u)); line-height: calc(16 * var(--hud-u)); color: var(--hud-dim-text); }
+        #hud:empty { display: none; }
+        #hud.raw { right: 10px; top: auto; bottom: 8px; padding: 0; text-shadow: none; white-space: pre; color: var(--hud-debug); font: 11px/1.4 ui-monospace, Menlo, monospace; }
+        #spd { left: var(--hud-m); bottom: var(--hud-m); line-height: 1; }
+        #spd b { display: inline-block; min-width: 2ch; text-align: right; font-weight: inherit; font-size: calc(30 * var(--hud-u)); }
+        #spd small { font-size: calc(16 * var(--hud-u)); color: var(--hud-text); margin-left: calc(5 * var(--hud-u)); }
+        #toast { left: 0; right: 0; text-align: center; top: calc(132 * var(--hud-u)); font-size: calc(18 * var(--hud-u)); line-height: calc(24 * var(--hud-u));
+            opacity: 0; will-change: transform, opacity; }
         #msg { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; background: rgba(0,0,0,.55); white-space: pre-line; }
         #msg.hidden { display: none; }
+        /* No WebGPU: a full-page note instead of the sim (see the check below). */
+        #nogpu { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; background: var(--hud-keyline); color: var(--hud-text);
+            font: var(--hud-w-light) 16px/1.5 var(--hud-font); }
+        #nogpu .card { max-width: 560px; }
+        #nogpu .hd { display: flex; align-items: center; gap: 14px; }
+        #nogpu .hd img { height: 44px; width: auto; }
+        #nogpu h1 { margin: 0; font-weight: var(--hud-w-regular); font-size: 28px; line-height: 1.2; }
+        #nogpu .why { margin: 14px 0 22px; color: var(--hud-quiet); }
+        #nogpu ul { margin: 0; padding: 0; list-style: none; border-top: 1px solid rgba(163,193,173,.35); }
+        #nogpu li { padding: 9px 0; border-bottom: 1px solid rgba(163,193,173,.35); }
+        #nogpu b { font-weight: var(--hud-w-regular); color: var(--hud-accent); }
+        #nogpu code { font-family: var(--hud-font); font-weight: var(--hud-w-regular); background: #202016; padding: 1px 6px; }
+        #nogpu .note { margin-top: 18px; font-size: 13px; color: var(--hud-quiet); }
     </style>
+    <!-- WebGPU check, before anything heavy: the sim's module (below, held as text) is only
+         started once navigator.gpu gives a hardware adapter. Otherwise a short note on how to
+         get WebGPU replaces it. No external requests; relative paths only. -->
+    <script>
+    window.gpuCheck = (async () => {
+        let why = '', adapter = null, note = '';
+        try {
+            if (!navigator.gpu) why = 'This browser does not offer WebGPU (no navigator.gpu).';
+            else {
+                adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+                if (!adapter) why = 'WebGPU is there, but no graphics adapter was offered (it may be blocked or disabled).';
+                else {
+                    const info = adapter.info || {}, desc = `${info.vendor || ''} ${info.architecture || ''} ${info.description || ''}`.toLowerCase();
+                    if (adapter.isFallbackAdapter || info.isFallbackAdapter || /swiftshader|llvmpipe|software/.test(desc)) why = 'WebGPU is only running in software here (no hardware GPU), which is far too slow for the sim.';
+                    if (!adapter.features.has('texture-compression-bc')) note = 'This GPU has no BC texture compression; textures load uncompressed (more memory, slower start).';
+                }
+            }
+        } catch (e) { why = `WebGPU failed to start (${e && e.message || e}).`; }
+        return { ok: !why, why, note };
+    })();
+    addEventListener('DOMContentLoaded', async () => {
+        const r = await window.gpuCheck;
+        window.gpuNote = r.note;
+        if (r.ok) {
+            const s = document.createElement('script'); s.type = 'module';
+            s.textContent = document.getElementById('sim-src').textContent;
+            document.body.appendChild(s);
+            return;
+        }
+        document.getElementById('msg').classList.add('hidden');
+        const d = document.createElement('div'); d.id = 'nogpu';
+        d.innerHTML = `<div class="card"><div class="hd"><img src="brand/cuds-badge.png" alt=""><h1>This sim needs WebGPU</h1></div>
+            <p class="why"></p>
+            <ul>
+                <li><b>Chrome or Edge</b> 113 or newer on Windows or macOS: on by default.</li>
+                <li><b>Safari</b> 26 or newer: on by default, as far as we know.</li>
+                <li><b>Chrome or Brave on Linux</b>: start it with <code>--enable-unsafe-webgpu --enable-features=Vulkan</code>.</li>
+                <li><b>Firefox</b> 141 or newer on Windows; elsewhere, try <code>dom.webgpu.enabled</code> in about:config.</li>
+            </ul>
+            <p class="note">Browser support changes quickly; if it still fails, update the browser and the graphics driver.</p></div>`;
+        d.querySelector('.why').textContent = r.why;
+        document.body.appendChild(d);
+        window.benchResult = { nogpu: r.why };
+    });
+    </script>
     <script type="importmap">
         {
             "imports": {
@@ -26,8 +141,10 @@
 </head>
 <body>
 <div id="hud"></div>
+<div id="spd"><b></b><small>km/h</small></div>
+<div id="toast"></div>
 <div id="msg">Loading…</div>
-<script type="module">
+<script type="text/plain" id="sim-src">
 // Sponza atrium, flown as a tiny whoop, WebGPU only (three r187).
 //
 // Look: the three.js lightprobes_sponza example - a physical SunLight with cascaded shadows, a
@@ -57,7 +174,7 @@ import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
 import { PhysicsEngine } from '../../js/physics.js?v=36';
 import { InputHandler } from '../../js/input.js?v=36';
 import * as CANNON from 'cannon-es';
-import { PilotUI } from './controls.js';
+import { PilotUI, throttleCurve } from './controls.js';
 import { AudioEngine } from '../../js/audio.js?v=36';
 import { RaceManager } from '../../js/race.js?v=36';
 import { formatTime } from '../../js/tracks.js?v=36';
@@ -291,12 +408,24 @@ if (q.get('mode') === 'survey') {
         const freeAll = (o, d) => Math.min(...[bvh, clothBVH, plantBVH].filter(Boolean).map((B) => B.raycastFirst(new THREE.Ray(o, d.clone().normalize()), THREE.DoubleSide)?.distance ?? 99));
         const G = withFacing(SPONZA_TRACK.gates).map((g) => {
             const yaw = THREE.MathUtils.degToRad(g.yaw), pit = THREE.MathUtils.degToRad(g.pitch);
-            return { ...g, p: new THREE.Vector3(g.x, g.y, g.z), n: new THREE.Vector3(Math.sin(yaw) * Math.cos(pit), Math.sin(pit), -Math.cos(yaw) * Math.cos(pit)) };
+            return { ...g, p: new THREE.Vector3(g.x, g.fy ?? g.y, g.z), n: new THREE.Vector3(Math.sin(yaw) * Math.cos(pit), Math.sin(pit), -Math.cos(yaw) * Math.cos(pit)) };
         });
         const gates = G.map((g) => {
             const u = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), g.n).normalize(), v = new THREE.Vector3().crossVectors(g.n, u);
-            let minR = 99; for (let k = 0; k < 16; k++) { const a2 = k / 16 * Math.PI * 2; minR = Math.min(minR, freeAll(g.p, u.clone().multiplyScalar(Math.cos(a2)).addScaledVector(v, Math.sin(a2)))); }
-            return { name: g.name, yaw: Math.round(g.yaw), pitch: Math.round(g.pitch), planeFree: +minR.toFixed(2), ahead: +freeAll(g.p, g.n).toFixed(2), behind: +freeAll(g.p, g.n.clone().negate()).toFixed(2) };
+            // Rectangular gates: the frame's outer edge (opening w x h plus 27 mm bars) against the
+            // free distance across (the corridor), up and down, and towards each outer corner,
+            // also from 15 cm in front of and behind the plane (window reveals, column bases).
+            const hw = (g.w ?? 1) / 2 + 0.027, hh = (g.h ?? 1) / 2 + 0.027, res = { name: g.name, w: g.w, h: g.h };
+            let worst = 99, worstAt = '';
+            const chk = (val, at) => { if (val < worst) { worst = val; worstAt = at; } };
+            for (const off of [0, 0.15, -0.15]) {
+                const o = g.p.clone().addScaledVector(g.n, off);
+                const L = freeAll(o, u.clone().negate()), Rr = freeAll(o, u), U = freeAll(o, v), D = freeAll(o, v.clone().negate());
+                if (off === 0) Object.assign(res, { left: +L.toFixed(2), right: +Rr.toFixed(2), up: +U.toFixed(2), down: +D.toFixed(2), corridor: +(L + Rr).toFixed(2), centreOff: +((Rr - L) / 2).toFixed(2) });
+                chk(L - hw, `left@${off}`); chk(Rr - hw, `right@${off}`); chk(U - hh, `up@${off}`); chk(D - hh, `down@${off}`);
+                for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { const d = u.clone().multiplyScalar(sx * hw).addScaledVector(v, sy * hh); chk(freeAll(o, d) - d.length(), `${sx < 0 ? 'left' : 'right'}-${sy < 0 ? 'low' : 'high'}@${off}`); }
+            }
+            return { ...res, yaw: Math.round(g.yaw), clearance: +worst.toFixed(3), worstAt, ok: worst > 0.05, ahead: +freeAll(g.p, g.n).toFixed(2), behind: +freeAll(g.p, g.n.clone().negate()).toFixed(2) };
         });
         const pts = linePoints(G, THREE.Vector3, (g) => g.n);
         const curve = new THREE.CatmullRomCurve3(pts, true, 'centripetal'), N = Math.ceil(curve.getLength() / 0.05);
@@ -311,7 +440,50 @@ if (q.get('mode') === 'survey') {
         for (let k = 0; k < N; k += 2) { const p0 = curve.getPointAt(k / N), p1 = curve.getPointAt(((k + 4) % N) / N), p2 = curve.getPointAt(((k + 8) % N) / N);
             const a3 = p0.distanceTo(p1), b3 = p1.distanceTo(p2), c3 = p0.distanceTo(p2), ar = new THREE.Vector3().crossVectors(p1.clone().sub(p0), p2.clone().sub(p0)).length() / 2;
             const R = ar > 1e-6 ? (a3 * b3 * c3) / (4 * ar) : 99; if (R < minRad) { minRad = R; radAt = p1.toArray().map((v) => +v.toFixed(2)); } }
-        window.benchResult = { gates, line: { length: +curve.getLength().toFixed(1), nHits: hits.length, hits: hits.slice(0, 12), minClearance: +minC.toFixed(2), minAt, minTurnRadius: +minRad.toFixed(2), radAt } };
+        // Fit (&fit=1): the largest frame each gate's opening allows. From the gate's centre
+        // height, the free span across (min over the plane and 15 cm either side), then for every
+        // 5 cm column of that span the clear height (floor or parapet below, vault or arch above,
+        // min over the three planes). The best interval maximises the clear area; the frame keeps
+        // 10 cm off everything, its 27 mm bars outside the opening. Then the whole frame outline
+        // is checked by rays from the centre every 5 cm and shrunk until it clears. Over the open
+        // courtyard nothing bounds it from above, so the height is capped (`cap`).
+        const fits = q.get('fit') === '1' ? G.map((g) => {
+            const u = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), g.n).normalize(), up = new THREE.Vector3(0, 1, 0), C = 0.1, B = 0.027, cap = 3;
+            const offs = [0, 0.15, -0.15].map((o) => g.p.clone().addScaledVector(g.n, o));
+            const L = Math.min(...offs.map((o) => freeAll(o, u.clone().negate()))), Rr = Math.min(...offs.map((o) => freeAll(o, u)));
+            const cols = [];
+            // No wider than the gate is now (its width was fitted to the corridor; wider spans
+            // reach through the arcade's arches): this fills the height.
+            const span = Math.min(4, (g.w ?? 4) / 2 + C + B);
+            for (let sx = -Math.min(L, span) + 0.02; sx < Math.min(Rr, span) - 0.02; sx += 0.05) {
+                let top = cap, bot = -cap;
+                for (const o of offs) { const c = o.clone().addScaledVector(u, sx); top = Math.min(top, freeAll(c, up)); bot = Math.max(bot, -freeAll(c, up.clone().negate())); }
+                cols.push([sx, top, bot]);
+            }
+            let best = null;
+            // The frame stays round the flown line: the interval must cover the gate's centre
+            // +-25 cm (else it wanders through an arch into the next space).
+            for (let i = 0; i < cols.length && cols[i][0] <= -0.25; i++) { let top = cap, bot = -cap; for (let j = i; j < cols.length; j++) {
+                if (cols[j][0] < 0.25) { top = Math.min(top, cols[j][1]); bot = Math.max(bot, cols[j][2]); continue; }
+                top = Math.min(top, cols[j][1]); bot = Math.max(bot, cols[j][2]);
+                const w = cols[j][0] - cols[i][0] - 2 * (C + B), h = top - bot - 2 * (C + B);
+                if (w > 0.3 && h > 0.3 && (!best || w * h > best.w * best.h)) best = { w, h, cu: (cols[i][0] + cols[j][0]) / 2, cy: (top + bot) / 2 };
+            } }
+            if (!best) return { name: g.name, fail: true };
+            // Check the outline from the centre; shrink 4% at a time until it clears.
+            let ok = false, k = 0;
+            for (; k < 25 && !ok; k++) {
+                const c = g.p.clone().addScaledVector(u, best.cu).addScaledVector(up, best.cy), hw = best.w / 2 + B + C, hh = best.h / 2 + B + C;
+                ok = true;
+                for (const o of [0, 0.15, -0.15]) { const cc = c.clone().addScaledVector(g.n, o);
+                    for (let t = -1; t <= 1.0001 && ok; t += 0.05 / Math.max(hw, hh)) for (const [ex, ey] of [[t * hw, hh], [t * hw, -hh], [hw, t * hh], [-hw, t * hh]]) {
+                        const d = u.clone().multiplyScalar(ex).addScaledVector(up, ey); if (freeAll(cc, d) < d.length() - 1e-3) { ok = false; break; } } }
+                if (!ok) { best.w *= 0.96; best.h *= 0.96; }
+            }
+            const c = g.p.clone().addScaledVector(u, best.cu).addScaledVector(up, best.cy);
+            return { name: g.name, x: +c.x.toFixed(2), y: +c.y.toFixed(2), z: +c.z.toFixed(2), w: +best.w.toFixed(2), h: +best.h.toFixed(2), shrinks: k - 1, ok };
+        }) : null;
+        window.benchResult = { gates, fits, line: { length: +curve.getLength().toFixed(1), nHits: hits.length, hits: hits.slice(0, 12), minClearance: +minC.toFixed(2), minAt, minTurnRadius: +minRad.toFixed(2), radAt } };
     }
     throw new Error('survey done');
 }
@@ -357,12 +529,38 @@ if (q.get('probes') !== '0') {
 const physics = new PhysicsEngine();
 physics.updateConfig({ mass: 0.032, thrustCurve: 0.5, restitution: 0.3, friction: 0.35 });
 // Flight settings (sliders in the M panel; tiny-whoop defaults in controls.js).
+// Top speed (km/h, as the speed readout shows it) is the level top speed: the props keep biting
+// up to 1.5x that airspeed, and the drag scale is solved so the steady level maximum lands on it.
 function applySettings(st) {
-    physics.updateConfig({ thrust: 0.032 * 9.81 * st.twr, propPitchSpeed: st.speed,
+    const top = st.topSpeed / 3.6;
+    physics.updateConfig({ thrust: 0.032 * 9.81 * st.twr, propPitchSpeed: 1.5 * top,
         rates: { roll: { center: st.rollCenter, max: st.rollMax, expo: st.rollExpo }, pitch: { center: st.pitchCenter, max: st.pitchMax, expo: st.pitchExpo }, yaw: { center: st.yawCenter, max: st.yawMax, expo: st.yawExpo } } });
     if (st.uptilt !== uptilt) { uptilt = st.uptilt; mountCamera?.(); }
+    // Hover throttle: the stick position where the throttle curve gives the hover command.
+    const c = physics.params.thrustCurve, tw = 1 / st.twr;
+    hoverCmd = (-(1 - c) + Math.sqrt((1 - c) ** 2 + 4 * c * tw)) / (2 * c);
+    thr = throttleCurve(st.hover / 100, hoverCmd);
+    if (top !== dragFor) { let lo = 0.02, hi = 50; for (let i = 0; i < 30; i++) { const k = Math.sqrt(lo * hi); (levelTop(k) > top ? lo = k : hi = k); } physics.params.drag = Math.sqrt(lo * hi); dragFor = top; }
 }
-physics.dragAreas = { x: 0.0011, y: 0.0035, z: 0.001 };
+let dragFor = null, hoverCmd = 0.4, thr = null;
+// Steady level top speed at full throttle for drag scale k, from physics.js's model: thrust with
+// prop inflow loss, body-axis airframe drag and rotor drag, best over the lean angle (the fastest
+// speed at which the thrust still holds the height).
+function levelTop(k) {
+    const P = physics.params, W = P.mass * 9.81, T = P.maxThrust, ps = P.propPitchSpeed, A = physics.dragAreas, q = 0.5 * physics.airDensity * k, kr = physics.rotorDrag * k;
+    let best = 0;
+    for (let deg = 2; deg < 88; deg += 2) {
+        const s = Math.sin(deg * Math.PI / 180), c = Math.cos(deg * Math.PI / 180);
+        const net = (v) => { const F = T * Math.max(0, 1 - v * s / ps), dy = q * v * A.y * v * s, dz = (q * v * A.z + kr) * v * c; return [(F - dy) * s - dz * c, (F - dy) * c + dz * s - W]; };
+        let lo = 0, hi = 80;
+        for (let i = 0; i < 30; i++) { const v = (lo + hi) / 2; (net(v)[0] > 0 ? lo = v : hi = v); }
+        if (lo > best && net(lo)[1] >= 0) best = lo;
+    }
+    return best;
+}
+// A ducted whoop is draggy for its size (ducts, guards, a bluff canopy): these areas set the shape
+// of its drag; the Top speed setting scales it (applySettings). TWR 3.4 punches out at 23 m/s^2.
+physics.dragAreas = { x: 0.0066, y: 0.00875, z: 0.006 };
 physics.rotorDrag = 0.45 * (0.032 / 0.5);
 // Ducts: contact spheres at the four duct centres plus the middle, coplanar with the CoM.
 const a = 0.032, r = 0.024;
@@ -399,9 +597,21 @@ mountCamera = function () {
     if (camMode === 'fpv') { pod.add(camera); camera.position.set(0, 0, 0); camera.rotation.set(THREE.MathUtils.degToRad(uptilt), 0, 0); }
     else scene.add(camera);
 };
+// Toast: one element, a word for a beat (fade in, hold, fade out; transform and opacity only),
+// timed on the frame clock so it also plays in offline recordings.
+const toastEl = document.getElementById('toast'), spdEl = document.querySelector('#spd b');
+let toastAt = -1e9, toastOp = '', frameNow = 0;
+function toast(text) { toastEl.textContent = text; toastAt = frameNow; }
+function drawToast(t) {
+    const e = (t - toastAt) / 1000, a = e < 0 || e > 1.1 ? 0 : Math.min(1, e / 0.12, (1.1 - e) / 0.25);
+    const op = a.toFixed(2);
+    if (op === toastOp) return;
+    toastOp = op; toastEl.style.opacity = op;
+    toastEl.style.transform = `translateY(${((1 - Math.min(1, e / 0.12)) * 6).toFixed(1)}px)`;
+}
 // Reset: back to the spawn, disarmed-safe (it stays armed if the switch is armed, like a real
 // sim's "respawn"), and out of any snag.
-function resetDrone() { physics.reset(); snag.t = 0; snag.hold = null; safe.length = 0; tt?.reset(); }
+function resetDrone() { physics.reset(); snag.t = 0; snag.hold = null; safe.length = 0; tt?.reset(); toast('Reset'); }
 // Recover (tryfpv-style respawn): back to where the whoop last flew freely, dropped onto the floor
 // below that point, level, keeping its heading and staying armed. Safe points are sampled every
 // 0.25 s while clear of walls and cloth; the newest ~1 s is skipped (that's usually the crash).
@@ -426,7 +636,7 @@ function recoverDrone() {
     physics.reset();
     physics.spawn.position.copy(keep.p); physics.spawn.quaternion.copy(keep.q);
     snag.t = 0; snag.hold = null; safe.length = Math.max(0, safe.length - 5);
-    snag.msgUntil = performance.now() + 900; snag.msg = 'RECOVER';
+    toast('Recovered');
 }
 // G cycles the lighting look; it reloads, because the bounce light is baked from the sun.
 function nextLook() {
@@ -443,7 +653,7 @@ Object.assign(audio, { minFrequency: 170, maxFrequency: 640, bladeCount: 4, maxT
 const startAudio = () => { if (!audio.ctx) audio.start(); };
 addEventListener('pointerdown', startAudio); addEventListener('keydown', startAudio);
 applySettings(ui.set);
-if (RACE) tt = new TimeTrial({ scene, race, track: SPONZA_TRACK, camera, getAudio: () => { if (!audio.ctx) return null; if (audio.ctx.state === 'suspended') audio.ctx.resume(); return audio.ctx; } });
+if (RACE) tt = new TimeTrial({ scene, race, track: SPONZA_TRACK, camera, toneMap: () => [renderer.toneMappingExposure, renderer.toneMapping === THREE.ACESFilmicToneMapping], keyLabel: (id) => ui.keyLabel(id), getAudio: () => { if (!audio.ctx) return null; if (audio.ctx.state === 'suspended') audio.ctx.resume(); return audio.ctx; } });
 mountCamera();
 const whoop = new THREE.Mesh(new THREE.TorusGeometry(0.028, 0.006, 6, 16).rotateX(Math.PI / 2), new THREE.MeshStandardNodeMaterial({ color: 0x222222, roughness: 0.6 }));
 const whoopG = new THREE.Group();
@@ -557,14 +767,14 @@ function syncCamera(dt) {
 // airframe (velocity and spin decay in ~0.1 s) and loads the props; a hit faster than 2.5 m/s, or
 // staying in it for 0.4 s, is a tangle: the whoop hangs in the cloth, props stalled, and resets
 // after a second. Leaves only drag (~0.35 s), and a little.
-const snag = { t: 0, hold: null, msgUntil: 0 }; let snagCount = 0;
+const snag = { t: 0, hold: null }; let snagCount = 0;
 const _sp = new THREE.Vector3(), _st = {};
 function touching(tree, p, r) { if (!tree) return false; _sp.set(p.x, p.y, p.z); const h = tree.closestPointToPoint(_sp, _st, 0, r); return !!h && h.distance < r; }
 function updateSnag(dt, now) {
     const b = physics.droneBody, p = b.position;
     if (snag.hold) {
         b.position.copy(snag.hold.pos); b.velocity.set(0, 0, 0); b.angularVelocity.scale(Math.exp(-dt / 0.05), b.angularVelocity);
-        if (now > snag.hold.until) { resetDrone(); snag.msgUntil = now + 800; snag.msg = 'RESET'; }
+        if (now > snag.hold.until) resetDrone();
         return;
     }
     if (touching(clothBVH, p, 0.06)) {
@@ -583,9 +793,35 @@ function updateSnag(dt, now) {
 // --- Loop ---
 let lastArmed = false;
 let last = performance.now(), frames = 0, fpsT = last, fps = 0;
+// Sim time (ms): what the race, the countdown, the ghost, snags and the autopilot run on. It stops
+// while the menu is open (paused), so nothing counts the pause.
+let simNow = last;
+let spdT = 0, spdTxt = '';
 const frameTimes = [], gpuTimes = [];
 const mode = q.get('mode') || 'fly';
-if (mode === 'bench') {
+if (mode === 'thrtest') {
+    // Throttle check (mode=thrtest): from a hover-height spawn in the open atrium, hold each
+    // throttle level for 2.5 s of sim time (no rendering) and report the vertical speed at the end.
+    physics.params.wind.strength = 0;
+    const out = {}, lv = (q.get('thr') || '0.15,0.20,0.25,0.30,0.50,1').split(',').map(Number); // stick
+    for (const t of lv) {
+        physics.setSpawn(0, 4, 0, 0); physics.reset();
+        for (let i = 0; i < 150; i++) { physics.setInputs({ throttle: thr.map(t), yaw: 0, pitch: 0, roll: 0 }, true); physics.step(1 / 60); }
+        out[t] = +physics.droneBody.velocity.y.toFixed(2);
+    }
+    // Level top speed: full throttle at a held lean (nose down about x), high above the building,
+    // 8 s to settle; the top speed is where the steady climb rate crosses zero.
+    const lean = [];
+    for (let deg = 30; deg <= 84; deg += 3) {
+        physics.setSpawn(0, 60, 0, 0); physics.reset();
+        const qd = new CANNON.Quaternion(); qd.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -deg * Math.PI / 180);
+        for (let i = 0; i < 480; i++) { const b = physics.droneBody; b.quaternion.copy(qd); b.angularVelocity.set(0, 0, 0); physics.setInputs({ throttle: 1, yaw: 0, pitch: 0, roll: 0 }, true); physics.step(1 / 60); }
+        const v = physics.droneBody.velocity; lean.push([deg, +Math.hypot(v.x, v.z).toFixed(2), +v.y.toFixed(2)]);
+    }
+    let levelTopMs = null;
+    for (let i = 1; i < lean.length; i++) if (lean[i - 1][2] >= 0 && lean[i][2] < 0) { const f = lean[i - 1][2] / (lean[i - 1][2] - lean[i][2]); levelTopMs = +(lean[i - 1][1] + f * (lean[i][1] - lean[i - 1][1])).toFixed(2); }
+    window.benchResult = { mode: 'thrtest', hoverStick: ui.set.hover, hoverCmd: +hoverCmd.toFixed(3), levelTopKmh: levelTopMs && +(levelTopMs * 3.6).toFixed(1), model: +(levelTop(physics.params.drag) * 3.6).toFixed(1), lean, twr: ui.set.twr, topSpeed: ui.set.topSpeed, drag: +physics.params.drag.toFixed(3), vy: out };
+} else if (mode === 'bench') {
     // Scripted: a fixed camera path round the atrium (no physics), to time rendering only.
     const N = Number(q.get('frames') || 240);
     const phase = Number(q.get('phase') || 0);
@@ -607,18 +843,22 @@ if (mode === 'bench') {
     frameTimes.sort((x, y) => x - y);
     const avg = (performance.now() - tS) / N;
     window.benchResult = { preset: q.get('q') || 'med', aa: window.aaMode, ...gpu, scale: preset.scale, w: renderer.domElement.width, h: renderer.domElement.height, fps: Math.round(1000 / avg * 10) / 10, p50: frameTimes[N >> 1].toFixed(1), p95: frameTimes[Math.floor(N * 0.95)].toFixed(1), loadMs, bvhMs, probeMs, dds: !!useDDS, spikes: spikes.slice(0, 30), nSpikes: spikes.length, adapter: renderer.backend.adapter?.info?.description || renderer.backend.adapter?.info?.vendor || '' };
-    hud.textContent = JSON.stringify(window.benchResult);
+    document.getElementById('spd').style.display = 'none';
+    hud.className = 'raw'; hud.textContent = JSON.stringify(window.benchResult);
 } else {
     const autolap = mode === 'autolap' && tt ? new Autopilot({ physics, gates: withFacing(SPONZA_TRACK.gates), normalOf: (g) => race.gates[SPONZA_TRACK.gates.findIndex((x) => x.name === g.name)].normal,
         vmax: Number(q.get('vmax') || 3.6) }) : null;
     if (autolap && q.get('rec') !== 'offline') startAudio();
-    if (autolap && q.get('rec')) hud.style.display = 'none';
+    if (autolap && q.get('rec') === 'offline') hud.style.display = 'none';
     // Clean plates for UI mockups: no HTML overlays (nohud=1), no path line (nopath=1).
-    if (q.get('nohud') === '1') { const st = document.createElement('style'); st.textContent = '#hud,#msg,#tt,#tt-arrow,#pilot-sticks,#pilot-cam,#pilot-status{display:none!important}'; document.head.appendChild(st); }
+    if (q.get('nohud') === '1') { const st = document.createElement('style'); st.textContent = '#hud,#spd,#toast,#msg,#tt,#tt-arrow,#pilot-sticks,#pilot-cam,#pilot-status{display:none!important}'; document.head.appendChild(st); }
     if (q.get('nopath') === '1' && tt) tt._path = () => {};
-    const auto = mode === 'flytest', track = []; let contacts = 0; const autoT0 = performance.now();
+    const shotUi = (q.get('shotui') || '').split(',');
+    if (shotUi.includes('sticks')) ui.set.sticks = 1;
+    const shot = autolap && q.get('shot') ? [q.get('shot').split('@')[0], Number(q.get('shot').split('@')[1] || 0)] : null;
+    const auto = mode === 'flytest', track = []; let contacts = 0; const autoT0 = performance.now(); simNow = autoT0;
     // Hover throttle for this airframe, from the thrust curve (thrust = T * mix(t, t^2, curve)).
-    const hoverT = (() => { const tw = 1 / ui.set.twr, c = physics.params.thrustCurve; let lo = 0, hi = 1; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; ((1 - c) * m + c * m * m < tw) ? lo = m : hi = m; } return lo; })();
+    const hoverT = thr.inv(hoverCmd); // hover stick
     // Shader warm-up: WebGPU builds a pipeline the first time each material is drawn, which stalls
     // a frame or two - felt as stutter when new parts of the building swing into view. Draw one
     // frame with nothing culled so everything is built before flight.
@@ -627,11 +867,8 @@ if (mode === 'bench') {
         scene.traverse((o) => { if (o.isMesh && o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
         draw(); await new Promise((r) => requestAnimationFrame(r));
         culled.forEach((o) => (o.frustumCulled = true));
-        last = performance.now(); fpsT = last;
+        last = performance.now(); fpsT = last; simNow = autoT0;
     }
-    // Dropped frames: a frame taking over 1.5 vsync intervals (~25 ms at 60 Hz). The fps average
-    // hides them, so the HUD counts them over the last 5 s.
-    const drops = [];
     // Offline recording (mode=autolap&rec=offline): no live loop. The recorder calls recStep()
     // once per video frame, which advances the sim by exactly 1/60 s and draws, so the video is
     // smooth whatever this machine manages in real time. Sound is logged per frame (sticks,
@@ -645,12 +882,41 @@ if (mode === 'bench') {
         for (const k of ['_tone', '_blip', '_buzz']) tt[k] = (...a) => recLog.sfx.push([recT(), k, a]);
         window.ttSay = (text) => recLog.speech.push([recT(), text]);
     }
+    let wasPaused = false, pausedDrawn = 0;
+    // Frame pacing (autolap): every frame's interval and the browser's long tasks (main thread
+    // busy over 50 ms), each matched to the nearest HUD moment (gate pass, lap, ...).
+    const pace = autolap ? { f: [], lt: [] } : null;
+    if (pace) try { new PerformanceObserver((l) => { for (const e of l.getEntries()) pace.lt.push([e.startTime, e.duration]); }).observe({ type: 'longtask', buffered: true }); } catch { /* unsupported */ }
+    const paceReport = () => {
+        const f = pace.f, iv = f.slice(1).map((x, i) => x[0] - f[i][0]).sort((a, b) => a - b), pc = (p) => +iv[Math.min(iv.length - 1, Math.floor(iv.length * p))].toFixed(1);
+        const simAt = (r) => { let lo = 0, hi = f.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; (f[m][0] < r) ? lo = m : hi = m; } return f[lo][1] + (r - f[lo][0]); };
+        const near = (sim) => { let best = null; for (const [k, v] of Object.entries(tt?.moments || {})) { const d = sim - v; if (best === null || Math.abs(d) < Math.abs(best[1])) best = [k, Math.round(d)]; } return best && `${best[0]}${best[1] >= 0 ? '+' : ''}${best[1]}ms`; };
+        const slow = f.slice(1).map((x, i) => [x[0] - f[i][0], x[0]]).filter(([d]) => d > 25);
+        return { frames: iv.length, p50: pc(0.5), p95: pc(0.95), p99: pc(0.99), over25: slow.length,
+            slow: slow.slice(0, 40).map(([d, r]) => [Math.round(d), +((r - autoT0) / 1000).toFixed(2), near(simAt(r))]),
+            longTasks: pace.lt.filter(([t]) => t > f[0][0]).map(([t, d]) => [Math.round(d), +((t - autoT0) / 1000).toFixed(2), near(simAt(t))]) };
+    };
     const tick = (vnow) => {
-        const now = vnow ?? performance.now(), dt = REC ? 1 / 60 : Math.min((now - last) / 1000, 0.1);
-        if (now - last > 25) drops.push(now);
-        while (drops.length && drops[0] < now - 5000) drops.shift();
-        last = now;
+        const real = vnow ?? performance.now();
+        let dt = REC ? 1 / 60 : Math.min((real - last) / 1000, 0.1);
+        last = real; frameNow = real; ui.now = real; // the stick trail's clock (virtual when recording)
         let { axes, armed } = ui.update();
+        // Pause: the menu (Esc) freezes the sim, the race and the motor sound; the scene still
+        // draws. The first frame back takes at most one 60 Hz step, so nothing jumps.
+        const paused = ui.paused && !REC;
+        if (paused !== wasPaused) {
+            wasPaused = paused;
+            if (audio.ctx) paused ? audio.ctx.suspend() : audio.ctx.resume();
+            try { paused ? speechSynthesis.pause() : speechSynthesis.resume(); } catch { /* no speech */ }
+            if (!paused) dt = Math.min(dt, 1 / 60);
+        }
+        // Paused, the scene is drawn once and then left (the canvas keeps the frame), so the menu
+        // costs no rendering.
+        if (paused) { if (!pausedDrawn || innerWidth !== pausedDrawn) { draw(); pausedDrawn = innerWidth; } drawReadouts(real); return; }
+        pausedDrawn = 0;
+        simNow += dt * 1000;
+        const now = simNow;
+        if (pace && !window.benchResult && tt?.stage !== 'idle') pace.f.push([real, now]);
         if (snag.hold || tt?.holding) axes = { ...axes, throttle: 0 };
         if (autolap) {
             // Demo flight (mode=autolap): arm, wait out the countdown, then the autopilot flies
@@ -658,12 +924,15 @@ if (mode === 'bench') {
             const t = (now - autoT0) / 1000;
             armed = t > 1.0;
             if (!tt || tt.stage === 'idle' || tt.stage === 'countdown') axes = { throttle: 0, yaw: 0, pitch: 0, roll: 0 };
-            else { const a = autolap.update(dt); axes = a; autolap.maxErr = Math.max(autolap.maxErr || 0, a.err); }
-            if (physics._inContact && t > 1 && tt?.stage === 'racing') contacts++;
-            if (tt?.stage === 'racing' && now - autolap.lastNow > 25) autolap.long = (autolap.long || 0) + 1; autolap.lastNow = now;
+            else { const a = autolap.update(dt); axes = { ...a, throttle: thr.inv(a.throttle) }; autolap.maxErr = Math.max(autolap.maxErr || 0, a.err); }
+            if (physics._inContact && t > 1 && tt?.stage === 'racing') { contacts++; if ((autolap.hits ||= []).length < 12) { const p = physics.droneBody.position; autolap.hits.push([+t.toFixed(2), +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)]); } }
+            if (tt?.stage === 'racing' && now - autolap.lastNow > 25) autolap.long = (autolap.long || 0) + 1;
+            if (tt?.stage === 'racing') { autolap.rT0 ??= now; autolap.rN = (autolap.rN || 0) + 1; autolap.rT1 = now; }
+            autolap.lastNow = now;
             if (tt?.stage === 'done') autolap.doneAt ??= t;
             if (!window.benchResult && (autolap.doneAt && t > autolap.doneAt + 3 || t > Number(q.get('tEnd') || 120))) {
-                window.benchResult = { mode: 'autolap', stage: tt?.stage, laps: tt?.lapTimes, holeshot: tt?.holeshot, maxErr: +(autolap.maxErr || 0).toFixed(2), contactFrames: contacts, snags: snagCount, t: +t.toFixed(1), fps, longFrames: autolap.long || 0 };
+                window.benchResult = { mode: 'autolap', stage: tt?.stage, laps: tt?.lapTimes, holeshot: tt?.holeshot, maxErr: +(autolap.maxErr || 0).toFixed(2), contactFrames: contacts, contactAt: autolap.hits || [], snags: snagCount, t: +t.toFixed(1), fps, longFrames: autolap.long || 0, racingFps: autolap.rN > 1 ? +((autolap.rN - 1) * 1000 / (autolap.rT1 - autolap.rT0)).toFixed(1) : null,
+                    hudMs: autolap.hudN ? +(autolap.hudMs / autolap.hudN).toFixed(3) : null, hudMaxMs: +(autolap.hudMax || 0).toFixed(2), pace: paceReport() };
             }
         }
         if (auto) {
@@ -671,7 +940,7 @@ if (mode === 'bench') {
             const t = (now - autoT0) / 1000;
             armed = t > 0.3;
             const climb = Number(q.get('climb') || 1.2);
-            axes = { throttle: t < climb ? 0.75 : t < 2.5 ? hoverT : hoverT + 0.06, yaw: 0, pitch: t > 2.5 ? -0.18 : 0, roll: 0 };
+            axes = { throttle: t < climb ? thr.inv(0.75) : t < 2.5 ? hoverT : thr.inv(hoverCmd + 0.06), yaw: 0, pitch: t > 2.5 ? -0.18 : 0, roll: 0 };
             const p = physics.droneBody.position;
             track.push([+t.toFixed(2), +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)]);
             if (physics._inContact) contacts++;
@@ -685,23 +954,60 @@ if (mode === 'bench') {
                 window.benchResult = { mode: 'flytest', race: RACE && { ...race.status(), stage: tt?.stage, path: window.ttPath }, sides: window.sides, recovered: window.recovered, probeBox: window.probeBox, probeMs, inside, contacts, snagged: snagCount, cloth: cb && [cb.min.toArray().map((v) => +v.toFixed(1)), cb.max.toArray().map((v) => +v.toFixed(1))], maxY: Math.max(...track.map((r) => r[2])).toFixed(2), path: track.filter((_, i) => i % 30 === 0) };
             }
         }
+        // Arm changes are toasts; disarmed mid-run also stays up as a status (below).
+        if (armed !== lastArmed && !(!armed && (tt?.stage === 'go' || tt?.stage === 'racing'))) toast(armed ? 'Armed' : 'Disarmed');
+        const stick = axes;
+        if (autolap) ui.stickAxes = stick; // the overlay shows the autopilot's sticks
+        axes = { ...axes, throttle: thr.map(axes.throttle) }; // throttle curve: stick -> motor command
         physics.setInputs(axes, armed); lastArmed = armed;
         physics.step(dt);
         updateSnag(dt, now);
         trackSafe(dt);
+        const hud0 = performance.now();
         tt?.update(dt, now, physics.droneBody.position, armed);
+        let hudMs = performance.now() - hud0;
         syncCamera(dt);
+        const hud1 = performance.now();
+        tt?.draw(now);
+        hudMs += performance.now() - hud1;
+        if (autolap && tt?.stage === 'racing') { autolap.hudMs = (autolap.hudMs || 0) + hudMs; autolap.hudN = (autolap.hudN || 0) + 1; autolap.hudMax = Math.max(autolap.hudMax || 0, hudMs); }
         autoExposure(dt);
         if (audio.ctx) audio.update(axes, armed && !snag.hold, physics.droneBody.velocity.length(), camMode === 'fpv' ? 0 : 0.5);
         draw();
         frames++;
-        if (now - fpsT > 500) { fps = Math.round(frames * 1000 / (now - fpsT)); frames = 0; fpsT = now; }
-        const v = physics.droneBody.velocity.length();
-        hud.textContent = `${fps} fps  ${drops.length} drops/5s  ${q.get('q') || 'med'} ${lookName} x${preset.scale}  ${(v * 3.6).toFixed(0)} km/h  tilt ${uptilt}°\nEsc menu, Space reset, R recover, G look, ↑↓ tilt, C camera${audio.ctx ? '' : ', click for sound'}`;
-        ui.setStatus(snag.hold ? '<span class="warn">TANGLED IN CLOTH</span>' : now < snag.msgUntil ? `<span class="warn">${snag.msg || 'RESET'}</span>`
-            : lastArmed ? '<span class="armed">ARMED</span>' : '<span class="disarmed">DISARMED</span>');
-        if (REC) { recLog.frames.push([recT(), axes.throttle, axes.yaw, axes.pitch, axes.roll, armed && !snag.hold ? 1 : 0, physics.droneBody.velocity.length()]); ui.axes = axes; ui._draw(); }
+        drawReadouts(real);
+        // Status: lasting states only (arm changes, resets and recovers are toasts): tangled, and
+        // disarmed in the middle of a run.
+        const racing = tt && (tt.stage === 'go' || tt.stage === 'racing');
+        ui.setStatus(snag.hold ? '<span class="warn">Tangled in cloth</span>' : racing && !lastArmed ? '<span class="disarmed">Disarmed</span>' : '');
+        // ?shot=<moment>@<ms> (autolap): freeze on a HUD moment for a screenshot (moments are named in
+        // timetrial.js: title, countdown, go, start, g<lap>.<gate>, lap<n>, done).
+        // &shotui=sticks,recover,menu adds the stick overlay, a recover 0.4 s before the shot (its
+        // toast), or the open menu (paused) to the shot.
+        if (shot && tt && tt.moments[shot[0]] != null && !window.benchResult) {
+            const at = tt.moments[shot[0]] + shot[1];
+            if (shotUi.includes('recover') && now >= at - 400 && !shot.recovered) { shot.recovered = true; recoverDrone(); }
+            if (now >= at) {
+                if (shotUi.includes('menu')) ui._toggle();
+                renderer.setAnimationLoop(null); window.benchResult = { shot: shot.join('@'), stage: tt.stage, fps };
+            }
+        }
+        if (REC) { recLog.frames.push([recT(), axes.throttle, axes.yaw, axes.pitch, axes.roll, armed && !snag.hold ? 1 : 0, physics.droneBody.velocity.length()]); ui._draw(); }
     };
+    // fps (twice a second, top right) and speed (10 Hz, bottom left), written only on change.
+    function drawReadouts(real) {
+        drawToast(real);
+        if (real - fpsT > 500) {
+            fps = Math.round(frames * 1000 / (real - fpsT)); frames = 0; fpsT = real;
+            const s = `${fps} fps`;
+            if (hud.textContent !== s) hud.textContent = s;
+        }
+        if (real - spdT >= 100) {
+            spdT = real;
+            const s = String(Math.round(physics.droneBody.velocity.length() * 3.6));
+            if (s !== spdTxt) { spdTxt = s; spdEl.textContent = s; }
+        }
+    }
     if (REC) {
         window.recStep = async () => {
             recNow += 1000 / 60; tick(recNow);
@@ -741,7 +1047,7 @@ if (mode === 'bench') {
         window.recSpeak = (text) => new Promise((res) => { try { const u = new SpeechSynthesisUtterance(text); u.rate = 1.1; u.onend = u.onerror = () => res(speechSynthesis.getVoices().length); speechSynthesis.speak(u); setTimeout(() => res(-1), 8000); } catch { res(-2); } });
         window.recReady = true;
     } else renderer.setAnimationLoop(() => tick());
-    window.sim = { renderer, scene, camera, physics, input, post, sun, ui, snag };
+    window.sim = { renderer, scene, camera, physics, input, post, sun, ui, snag, tt };
 }
 </script>
 </body>

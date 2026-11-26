@@ -1,54 +1,221 @@
 // Time trial on top of js/race.js's RaceManager (gate crossing and lap timing), following what
 // race timers and sims do (research notes: MultiGP, RotorHazard, Velocidrone manual):
-// - Start: three 440 Hz ticks a second apart, then a random 1-5 s hold, then GO (880 Hz, 0.7 s)
-//   - RotorHazard's staging and start tones. The whoop is held until GO. Holeshot = GO to the
-//   first start/finish crossing; the lap clock starts there (MultiGP). Runs are 3 laps.
-// - Gates: square frames. Next gate bright and pulsing, the one after it dim cyan, passed gates
-//   grey and faded, start/finish magenta with a chequered top bar; flying the next gate the
-//   wrong way flashes it red and buzzes; an arrow at the screen edge points to an off-screen
-//   next gate (Velocidrone's gate navigation).
-// - The path ahead: a line from the last gate through the next two only, redrawn as you pass.
+// - Start: a quick one, as the user asked: arming shows "Ready" for a second, then "Go" with
+//   RotorHazard's 880 Hz start tone (0.7 s). The whoop is held until Go. Holeshot = Go to the
+//   first start/finish crossing; the clock starts there (MultiGP). Runs are 2 laps (track.js).
+// - Gates: square frames. The next gate in the accent with a dark keyline, the one after it in
+//   the quiet colour, the rest faint white; start/finish has a chequered top bar. A gate flares
+//   white as you pass it; flying the next gate the wrong way flashes it red and buzzes; an arrow
+//   at the screen edge points to an off-screen next gate (Velocidrone's gate navigation).
+// - The path ahead: a line from the last gate through the next two only, shading from the
+//   accent to the quiet colour, on a dark keyline.
 // - Sounds: gate tick 1 kHz with a pitch ladder; lap chime 660/990 Hz plus the time spoken;
 //   best lap 1200/1800 Hz square (RotorHazard's leader tone) plus speech; finish pattern.
 // - Best lap stored in the browser (per track): its split at every gate and its flight path,
-//   replayed as a ghost whoop. Each gate flashes the delta to the best lap's split.
+//   replayed as a ghost whoop. The best run total (per lap count) is stored separately for the title card.
+// - HUD (moment-based): mid-flight only the running clock, the next gate's distance and the
+//   camera angle (controls.js). Everything else appears at its moment and leaves: title card
+//   before the run, Ready / Go, the delta to the best lap's split at each gate (small,
+//   under the clock), the lap time at each lap, the result at the finish. Look: the Cambridge
+//   University Drone Society brand (Ubuntu, near-black plates, cyan and sage). Every font and
+//   colour is a CSS custom property in index.html's :root, and the in-world colours are
+//   GATE_COLOURS below. Animation is computed from the sim clock passed to update() (the
+//   offline recorder steps it), and the DOM is written only when a value changes, with
+//   transforms and opacity for motion.
 import * as THREE from 'three/webgpu';
-import { positionView, smoothstep, float } from 'three/tsl';
+import { positionView, smoothstep, float, uv, mix, uniform, length } from 'three/tsl';
 import { formatTime } from '../../js/tracks.js?v=36';
-import { linePoints, LEAD } from './track.js';
+import { linePoints, LEAD, SPONZA_PLAN } from './track.js';
 
-const C = { next: 0xff7a00, after: 0x00d5ff, idle: 0x00d5ff, passed: 0x5a5a5a, start: 0xff2fb3, wrong: 0xff2020 };
+// In-world colours (sRGB hex) and opacities: gates, path (accent to quiet along the line), the
+// keylines under the next gate and the path, the ghost.
+export const GATE_COLOURS = {
+    next: 0x00d3f0, after: 0xa3c1ad, idle: 0xffffff, start: 0xffffff, wrong: 0xff6b57, flash: 0xffffff, keyline: 0x14140a,
+    nextOp: 1, afterOp: 0.9, idleOp: 0.22, startOp: 0.55, keylineOp: 0.55,
+    fillNext: 0.15, fillAfter: 0.075, // the faint film across the opening: next gate (accent), gate after (quiet); none on the rest
+    path: [0x00d3f0, 0xa3c1ad], pathOp: 0.95, pathKeylineOp: 0.5, ghost: 0xa3c1ad,
+};
+const C = GATE_COLOURS;
 const secs = (ms) => (ms / 1000).toFixed(1);
 const say = (text) => {
     if (window.ttSay) return window.ttSay(text); // recording: logged and voiced separately
     try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.rate = 1.1; speechSynthesis.speak(u); } catch { /* no speech */ }
 };
+const READY_MS = 1000; // "Ready" before "Go"
+const clamp01 = (x) => Math.min(1, Math.max(0, x));
+const ease = (x) => 1 - (1 - x) * (1 - x);
+// Deltas: at most two significant figures and two decimals (+0.01, -0.18, +0.4, -1.2, +12), a true minus sign, green
+// when faster; judged on the value shown, so 0 is neither.
+const deltaVal = (d) => (d === 0 ? 0 : Math.sign(d) * Math.round(Number((Math.abs(Math.round(d)) / 1000).toPrecision(2)) * 100) / 100);
+const deltaText = (d) => { const v = deltaVal(d); return `${v < 0 ? '−' : v > 0 ? '+' : ''}${Math.abs(v)}`; };
+const deltaCls = (d) => { const v = deltaVal(d); return v < 0 ? 'good' : v > 0 ? 'bad' : ''; };
+
+// Exact colours through the tone mapping: three's WebGPU renderer tone maps the whole frame (there
+// is no per-material toneMapped), so for ACES (the warm and noon looks) the marks are given the
+// input that ACES maps back to the wanted colour at the current exposure (three's ACESFilmic fit
+// inverted: output matrix, the RRT+ODT rational per channel, input matrix). A colour ACES cannot
+// reach (the brand cyan: no red at all) would clamp to a pale tint, so it gets the nearest one
+// it can reach in sRGB instead (a short pattern search through the forward fit), a slightly
+// deeper cyan. Other tone mappings only get the exposure divided out.
+const colM = (c0, c1, c2) => new THREE.Matrix3().set(c0[0], c1[0], c2[0], c0[1], c1[1], c2[1], c0[2], c1[2], c2[2]);
+const ACES_IN = colM([0.59719, 0.07600, 0.02840], [0.35458, 0.90834, 0.13383], [0.04823, 0.01566, 0.83777]);
+const ACES_OUT = colM([1.60475, -0.10208, -0.00327], [-0.53108, 1.10813, -0.07276], [-0.07367, -0.00605, 1.07602]);
+const ACES_IN_INV = ACES_IN.clone().invert(), ACES_OUT_INV = ACES_OUT.clone().invert();
+const _cv = new THREE.Vector3(), _fv = new THREE.Vector3();
+const rrt = (v) => (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
+const toSRGB = (l) => { l = Math.min(1, Math.max(0, l)); return l <= 0.0031308 ? 12.92 * l : 1.055 * l ** (1 / 2.4) - 0.055; };
+function acesOut(c, exposure) { // scene-linear input -> displayed sRGB 0..1
+    _fv.copy(c).multiplyScalar(exposure / 0.6).applyMatrix3(ACES_IN);
+    _fv.set(rrt(_fv.x), rrt(_fv.y), rrt(_fv.z)).applyMatrix3(ACES_OUT);
+    return [toSRGB(_fv.x), toSRGB(_fv.y), toSRGB(_fv.z)];
+}
+function sceneColour(out, hex, exposure, aces) {
+    out.setHex(hex);
+    if (!aces) return out.multiplyScalar(1 / exposure);
+    _cv.set(out.r, out.g, out.b).applyMatrix3(ACES_OUT_INV);
+    for (const k of ['x', 'y', 'z']) {
+        const w = Math.min(Math.max(_cv[k], 0), 0.999), A = 1 - 0.983729 * w, B = 0.0245786 - 0.432951 * w, Cc = -(0.000090537 + 0.238081 * w);
+        _cv[k] = (-B + Math.sqrt(B * B - 4 * A * Cc)) / (2 * A);
+    }
+    _cv.applyMatrix3(ACES_IN_INV).multiplyScalar(0.6 / exposure);
+    if (Math.min(_cv.x, _cv.y, _cv.z) < 0) {
+        const want = new THREE.Color(hex).getRGB(new THREE.Color(), THREE.SRGBColorSpace), t = [want.r, want.g, want.b];
+        const c = [Math.max(0, _cv.x), Math.max(0, _cv.y), Math.max(0, _cv.z)], v = new THREE.Vector3();
+        const err = () => { const o = acesOut(v.fromArray(c), exposure); return (o[0] - t[0]) ** 2 + (o[1] - t[1]) ** 2 + (o[2] - t[2]) ** 2; };
+        let e = err();
+        for (let step = Math.max(...c) / 2; step > 1e-5;) {
+            let better = false;
+            for (let i = 0; i < 3; i++) for (const d of [step, -step]) {
+                const was = c[i]; c[i] = Math.max(0, was + d); const n = err();
+                if (n < e) { e = n; better = true; } else c[i] = was;
+            }
+            if (!better) step /= 2;
+        }
+        _cv.fromArray(c);
+    }
+    return out.setRGB(Math.max(0, _cv.x), Math.max(0, _cv.y), Math.max(0, _cv.z), THREE.LinearSRGBColorSpace);
+}
+
+const CSS = `
+#tt { position: fixed; inset: 0; z-index: 5; pointer-events: none; color: var(--hud-text); font-family: var(--hud-font); font-style: var(--hud-style);
+  font-weight: var(--hud-w-regular); font-variant-numeric: var(--hud-num); line-height: 1; }
+#tt > div { position: absolute; visibility: hidden; }
+#tt .on { visibility: visible; }
+/* Plate-less by default (shadowed type); plates only on the clock + delta and the lap result. */
+#tt .pl { white-space: nowrap; text-shadow: var(--hud-shadow); }
+#tt .good, #tt .bad { text-shadow: var(--hud-shadow-strong); } #tt .lap .good, #tt .lap .bad, #tt .delta .pl { text-shadow: none; }
+#tt .q { color: var(--hud-quiet); }
+#tt .lt { font-weight: var(--hud-w-light); }
+#tt .good { color: var(--hud-good); } #tt .bad { color: var(--hud-bad); }
+#tt .mid { left: 0; right: 0; text-align: center; }
+#tt .mid > .pl { display: inline-block; }
+/* Clock + delta: one plate in two rows; the clock's first digit on the timing column (--hud-col),
+   so the clock sits centred; the delta row joins under it, divided by a sage hairline. */
+#tt .clock { left: var(--hud-col); top: calc(24 * var(--hud-u)); margin-left: calc(-14 * var(--hud-u)); display: flex; flex-direction: column; width: max-content; }
+#tt .clock .pl, #tt .lap > .pl { background: var(--hud-plate); text-shadow: none; padding: 0 calc(14 * var(--hud-u)); }
+#tt .clock .pl { display: flex; align-items: center; border-radius: var(--hud-r); }
+#tt .clock > .pl { height: calc(44 * var(--hud-u)); font-size: calc(32 * var(--hud-u)); contain: layout paint; }
+#tt .clock.wd > .pl { border-radius: var(--hud-r) var(--hud-r) 0 0; }
+#tt .delta { visibility: hidden; will-change: opacity; } #tt .delta.on { visibility: visible; }
+#tt .delta > .pl { box-sizing: border-box; height: calc(28 * var(--hud-u)); font-size: calc(18 * var(--hud-u)); border-top: 1px solid var(--hud-div); border-radius: 0 0 var(--hud-r) var(--hud-r); }
+#tt .dist { left: 0; top: 0; padding: 0 calc(6 * var(--hud-u)); font-size: calc(16 * var(--hud-u)); line-height: calc(20 * var(--hud-u)); font-weight: var(--hud-w-regular); will-change: transform; }
+/* Title card: no plate, one left edge, the type carried by a soft shadow. */
+#tt .title { left: calc(56 * var(--hud-u)); top: calc(48 * var(--hud-u)); text-shadow: var(--hud-title-shadow); }
+#tt .title > * { display: block; margin: 0; }
+#tt .title .badge { height: calc(44 * var(--hud-u)); width: auto; margin-left: calc(-4 * var(--hud-u)); filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
+#tt .title .nm { margin-top: calc(14 * var(--hud-u)); font-size: calc(32 * var(--hud-u)); line-height: calc(36 * var(--hud-u)); }
+#tt .hd { display: flex; align-items: center; gap: calc(12 * var(--hud-u)); }
+#tt .hd img { height: calc(40 * var(--hud-u)); width: auto; }
+#tt .title .sub { font-size: calc(18 * var(--hud-u)); line-height: calc(22 * var(--hud-u)); margin-top: calc(6 * var(--hud-u)); }
+#tt .title .sub span { color: var(--hud-text); }
+#tt .title svg { margin-top: calc(18 * var(--hud-u)); width: calc(300 * var(--hud-u)); height: auto; overflow: visible; filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }
+#tt .keys { display: flex; gap: calc(26 * var(--hud-u)); font-size: calc(17 * var(--hud-u)); font-weight: var(--hud-w-light); }
+#tt .keys b { font-weight: inherit; background: var(--hud-plate); border: 1px solid var(--hud-quiet); padding: calc(1 * var(--hud-u)) calc(7 * var(--hud-u)); margin-right: calc(8 * var(--hud-u)); }
+#tt .title .keys { display: flex; margin-top: calc(18 * var(--hud-u)); line-height: calc(24 * var(--hud-u)); }
+#tt .title .keys b { background: none; border-color: var(--hud-text); box-shadow: 0 1px 2px rgba(0,0,0,.5); }
+#tt .title .cr { margin-top: calc(18 * var(--hud-u)); max-width: calc(300 * var(--hud-u)); white-space: normal; font-size: calc(11 * var(--hud-u)); line-height: 1.35; }
+#tt .title .cr a { color: inherit; pointer-events: auto; }
+#tt .count { top: calc(440 * var(--hud-u)); }
+#tt .count > .pl { padding: calc(10 * var(--hud-u)) calc(26 * var(--hud-u)) calc(14 * var(--hud-u)); font-size: calc(40 * var(--hud-u)); line-height: calc(48 * var(--hud-u)); font-weight: var(--hud-w-light); }
+#tt .count .bar { margin-top: calc(8 * var(--hud-u)); height: calc(3 * var(--hud-u)); background: var(--hud-track); }
+#tt .count .bar i { display: block; height: 100%; background: var(--hud-text); transform-origin: 0 0; transform: scaleX(0); will-change: transform; }
+#tt .go { top: calc(440 * var(--hud-u)); will-change: transform, opacity; }
+#tt .go > .pl { padding: calc(10 * var(--hud-u)) calc(26 * var(--hud-u)) calc(14 * var(--hud-u)); min-width: calc(56 * var(--hud-u)); font-size: calc(40 * var(--hud-u)); line-height: calc(48 * var(--hud-u)); font-weight: var(--hud-w-regular); }
+#tt .go .bar { margin-top: calc(8 * var(--hud-u)); height: calc(3 * var(--hud-u)); background: var(--hud-text); }
+/* Lap result: bottom centre, above the sticks, on a plate: "Lap 2" and the time on one baseline,
+   then the delta and the previous best under a divider. */
+#tt .lap { bottom: calc(124 * var(--hud-u)); will-change: transform, opacity; }
+#tt .lap > .pl { display: inline-flex; flex-direction: column; text-align: left; padding: 0; border-radius: var(--hud-r); }
+#tt .lap .top, #tt .lap .r { display: flex; align-items: baseline; justify-content: space-between; gap: calc(16 * var(--hud-u)); padding: 0 calc(14 * var(--hud-u)); }
+#tt .lap .top { height: calc(52 * var(--hud-u)); align-items: center; }
+#tt .lap .n { font-size: calc(16 * var(--hud-u)); }
+#tt .lap .t { font-size: calc(36 * var(--hud-u)); font-weight: var(--hud-w-light); }
+#tt .lap .r { height: calc(28 * var(--hud-u)); align-items: center; border-top: 1px solid var(--hud-div); font-size: calc(16 * var(--hud-u)); font-weight: var(--hud-w-light); }
+#tt .lap .r .good, #tt .lap .r .bad { font-weight: var(--hud-w-regular); }
+#tt .final { top: calc(560 * var(--hud-u)); will-change: transform, opacity; }
+#tt .final > .pl { padding: calc(8 * var(--hud-u)) calc(22 * var(--hud-u)) calc(10 * var(--hud-u)); font-size: calc(30 * var(--hud-u)); line-height: calc(36 * var(--hud-u)); }
+#tt .fin { inset: 0; background: var(--hud-dim); will-change: opacity; }
+#tt .fin > * { position: absolute; }
+#tt .fin .panel { left: 0; top: 0; bottom: 0; width: calc(600 * var(--hud-u)); background: var(--hud-panel); }
+#tt .fin .body { left: calc(72 * var(--hud-u)); top: calc(56 * var(--hud-u)); }
+#tt .fin .hd span { font-size: calc(22 * var(--hud-u)); font-weight: var(--hud-w-light); }
+#tt .fin .nb { font-size: calc(22 * var(--hud-u)); margin-top: calc(30 * var(--hud-u)); }
+#tt .fin .tot { font-size: calc(84 * var(--hud-u)); line-height: calc(92 * var(--hud-u)); margin: calc(8 * var(--hud-u)) 0 0 calc(-4 * var(--hud-u)); }
+#tt .fin .dl { display: flex; align-items: baseline; gap: calc(16 * var(--hud-u)); margin-top: calc(2 * var(--hud-u)); }
+#tt .fin .dl > span:first-child { font-size: calc(30 * var(--hud-u)); }
+#tt .fin .dl > span + span { font-size: calc(18 * var(--hud-u)); font-weight: var(--hud-w-light); }
+#tt .fin .laps { margin-top: calc(30 * var(--hud-u)); }
+#tt .fin .laps div { display: flex; align-items: baseline; gap: calc(22 * var(--hud-u)); font-size: calc(22 * var(--hud-u)); line-height: calc(34 * var(--hud-u)); font-weight: var(--hud-w-light); }
+#tt .fin .laps span:first-child { width: calc(16 * var(--hud-u)); color: var(--hud-quiet); }
+#tt .fin .laps .best { color: var(--hud-accent); font-weight: var(--hud-w-regular); }
+#tt .fin .laps .best span:first-child { color: inherit; }
+#tt .fin .laps em { font-style: normal; font-size: calc(15 * var(--hud-u)); }
+#tt .fin svg { left: calc(680 * var(--hud-u)); top: calc(170 * var(--hud-u)); width: calc(540 * var(--hud-u)); height: auto; overflow: visible; }
+#tt .fin .keys { left: calc(72 * var(--hud-u)); bottom: calc(36 * var(--hud-u)); }
+#tt svg .wall { fill: none; stroke: var(--hud-plan-wall); }
+#tt svg .gate { stroke: var(--hud-plan-gate); stroke-linecap: round; }
+#tt svg .gate.s { stroke: var(--hud-plan-start); }
+#tt svg .line { fill: none; stroke: var(--hud-plan-line); stroke-linejoin: round; stroke-linecap: round; }
+#tt svg .key { fill: none; stroke: var(--hud-keyline); stroke-linejoin: round; stroke-linecap: round; }
+#tt-arrow { position: fixed; left: 50%; top: 50%; width: 0; height: 0; z-index: 5; pointer-events: none; display: none; will-change: transform;
+  border-left: 14px solid transparent; border-right: 14px solid transparent; border-bottom: 26px solid var(--hud-accent); filter: drop-shadow(0 0 1.5px var(--hud-keyline)); }`;
 
 export class TimeTrial {
-    constructor({ scene, race, track, camera, getAudio, isFake = false }) {
-        this.race = race; this.track = track; this.camera = camera; this.getAudio = getAudio;
+    // keyLabel(action): the key bound to a pilot action ('reset', 'menu', 'arm'), for the hints.
+    // toneMap(): [exposure, isACES] of the renderer now (auto-exposure moves the exposure), so the
+    // in-world marks keep their exact colours.
+    constructor({ scene, race, track, camera, getAudio, isFake = false, keyLabel = () => '', toneMap = () => [1, false] }) {
+        this.toneMap = toneMap; this.race = race; this.track = track; this.camera = camera; this.getAudio = getAudio; this.keyLabel = keyLabel;
         this.laps = track.laps || 3;
         this.group = race.group;
         this.bestKey = `tm.sponza.best.${track.id}`;
+        this.runKey = `tm.sponza.bestRun.${track.id}.${this.laps}`; // a best total only compares with runs of as many laps
         try { this.best = JSON.parse(localStorage.getItem(this.bestKey) || 'null'); } catch { this.best = null; }
+        try { this.bestRun = JSON.parse(localStorage.getItem(this.runKey) || 'null'); } catch { this.bestRun = null; }
+        this._sc = {}; this._scKey = '';
         this._buildGates();
+        this._buildPath();
         this._buildHud();
-        this.ghostMesh = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.03, 0.075), new THREE.MeshBasicNodeMaterial({ color: 0xff9a3a, transparent: true, opacity: 0.55, depthWrite: false }));
+        // The ghost fades out near the camera: flying the best lap's line, it would sit on the lens.
+        this.ghostMesh = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.03, 0.075), Object.assign(new THREE.MeshBasicNodeMaterial({ color: C.ghost, transparent: true, depthWrite: false }),
+            { opacityNode: float(0.55).mul(smoothstep(0.25, 0.8, positionView.length())) }));
         this.ghostMesh.visible = false; this.group.add(this.ghostMesh);
-        this.pathMesh = null; this._pathFor = -2;
+        this.moments = {};
         this.reset();
         this.isFake = isFake;
     }
 
     // --- gates ---------------------------------------------------------------------------
     _buildGates() {
-        const half = this.track.gateRadius, bar = 0.045, o = half + bar / 2;
-        const frameGeo = () => {
-            const parts = [
-                new THREE.BoxGeometry(2 * half + 2 * bar, bar, bar).translate(0, o, 0),
-                new THREE.BoxGeometry(2 * half + 2 * bar, bar, bar).translate(0, -o, 0),
-                new THREE.BoxGeometry(bar, 2 * half, bar).translate(o, 0, 0),
-                new THREE.BoxGeometry(bar, 2 * half, bar).translate(-o, 0, 0),
+        // Thin bars (27 mm) round each gate's opening (halfW x halfH, RaceManager's pass test),
+        // outside it.
+        const bar = 0.027;
+        const frameGeo = (b, hw, hh) => {
+            const ox = hw + b / 2, oy = hh + b / 2, parts = [
+                new THREE.BoxGeometry(2 * hw + 2 * b, b, b).translate(0, oy, 0),
+                new THREE.BoxGeometry(2 * hw + 2 * b, b, b).translate(0, -oy, 0),
+                new THREE.BoxGeometry(b, 2 * hh, b).translate(ox, 0, 0),
+                new THREE.BoxGeometry(b, 2 * hh, b).translate(-ox, 0, 0),
             ];
             const pos = [], idx = []; let base = 0;
             for (const p of parts) { const ni = p.index.array, pa = p.attributes.position.array; pos.push(...pa); for (const k of ni) idx.push(k + base); base += pa.length / 3; p.dispose(); }
@@ -59,9 +226,22 @@ export class TimeTrial {
         const cx = cv.getContext('2d');
         for (let i = 0; i < 16; i++) for (let j = 0; j < 2; j++) { cx.fillStyle = (i + j) % 2 ? '#111' : '#fff'; cx.fillRect(i * 4, j * 4, 4, 4); }
         const chk = new THREE.CanvasTexture(cv); chk.colorSpace = THREE.SRGBColorSpace; chk.magFilter = THREE.NearestFilter;
+        // The film: a translucent plane exactly filling each opening, like a faint fog you fly
+        // through: unlit, both sides, no depth write, a little thinner towards the edges, and
+        // gone within ~1.5 m of the lens (as the path is) so it never washes the screen.
+        const filmFade = smoothstep(0.4, 1.5, positionView.length()), filmEdge = float(1).sub(smoothstep(0.25, 0.75, length(uv().sub(0.5))).mul(0.45));
+        const kmat = new THREE.MeshBasicNodeMaterial({ color: C.keyline, transparent: true, opacity: C.keylineOp, depthWrite: false });
         for (const g of this.race.gates) {
             g.mesh.geometry.dispose();
-            g.mesh.geometry = frameGeo();
+            g.mesh.geometry = frameGeo(bar, g.halfW, g.halfH);
+            // The keyline for when it is the next gate: a wider dark frame drawn first, without
+            // depth, so the accent frame covers its middle and it rims both edges.
+            g.keyGeo = frameGeo(bar + 0.024, g.halfW - 0.012, g.halfH - 0.012);
+            g.filmOp = uniform(0); g.filmCol = uniform(new THREE.Color(C.next));
+            const fm = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
+            fm.colorNode = g.filmCol; fm.opacityNode = g.filmOp.mul(filmEdge).mul(filmFade);
+            g.film = new THREE.Mesh(new THREE.PlaneGeometry(2 * g.halfW, 2 * g.halfH), fm);
+            g.film.renderOrder = -3; g.film.visible = false; g.mesh.add(g.film);
             g.mesh.material.dispose();
             g.mesh.material = new THREE.MeshBasicNodeMaterial({ color: C.idle, transparent: true, opacity: 1 });
             // RaceManager orients the mesh's +Z onto the gate normal; keep the frame upright.
@@ -69,51 +249,95 @@ export class TimeTrial {
             g.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, n));
             g.label.visible = false; // no text on gates
             if (g.index === 0) {
-                const top = new THREE.Mesh(new THREE.BoxGeometry(2 * half + 2 * bar + 0.002, bar + 0.012, bar + 0.012), new THREE.MeshBasicNodeMaterial({ map: chk }));
-                top.position.set(0, o, 0); g.mesh.add(top);
+                const top = new THREE.Mesh(new THREE.BoxGeometry(2 * g.halfW + 2 * bar + 0.002, bar + 0.012, bar + 0.012), new THREE.MeshBasicNodeMaterial({ map: chk }));
+                chk.repeat.set(Math.max(1, Math.round(g.halfW / 0.5)), 1); chk.wrapS = THREE.RepeatWrapping;
+                top.position.set(0, g.halfH + bar / 2, 0); g.mesh.add(top);
             }
-            g.wrongUntil = 0;
+            g.wrongUntil = 0; g.flashUntil = 0;
         }
+        this.keyline = new THREE.Mesh(this.race.gates[0].keyGeo, kmat);
+        this.keyline.renderOrder = -1; this.keyline.visible = false; this.group.add(this.keyline);
+
     }
 
-    _colour(now) {
-        const n = this.race.nextGate, N = this.race.gates.length, racing = this.stage === 'racing';
-        const pulse = 0.75 + 0.25 * Math.sin(now * 0.0063); // ~1 Hz
+    // Colours for the scene's current tone mapping, recomputed when the exposure moves.
+    _sceneColours() {
+        const [e, aces] = this.toneMap(), key = `${aces}:${e.toFixed(3)}`;
+        if (key === this._scKey) return false;
+        this._scKey = key;
+        for (const k of ['next', 'after', 'idle', 'start', 'wrong', 'flash', 'keyline', 'ghost']) sceneColour(this._sc[k] ??= new THREE.Color(), C[k], e, aces);
+        sceneColour(this.pathA.value, C.path[0], e, aces); sceneColour(this.pathB.value, C.path[1], e, aces);
+        sceneColour(this.pathKey.value, C.keyline, e, aces);
+        this.keyline.material.color.copy(this._sc.keyline); this.ghostMesh.material.color.copy(this._sc.ghost);
+        return true;
+    }
+
+    _colour(now, pos) {
+        const n = this.race.nextGate, N = this.race.gates.length, live = this.stage !== 'done', S = this._sc;
+        this._sceneColours();
         for (const g of this.race.gates) {
-            const m = g.mesh.material; let col, op = 1, s = 1;
-            if (now < g.wrongUntil) { col = C.wrong; }
-            else if (g.index === n && this.stage !== 'done') { col = g.index === 0 ? C.start : C.next; op = pulse; s = 1 + 0.03 * Math.sin(now * 0.0063); }
-            else if (g.index === (n + 1) % N && this.stage !== 'done') { col = C.after; op = 0.45; }
-            else if (racing && g.index < n && g.index !== 0) { col = C.passed; op = 0.2; }
-            else if (g.index === 0) { col = C.start; op = 0.7; }
-            else { col = C.idle; op = 0.25; }
-            m.color.setHex(col); m.opacity = op; g.mesh.scale.setScalar(s);
+            const m = g.mesh.material; let col, op;
+            if (now < g.wrongUntil) { col = S.wrong; op = 1; }
+            else if (now < g.flashUntil) { col = S.flash; op = 1; }
+            else if (g.index === n && live) { col = S.next; op = C.nextOp; }
+            else if (g.index === (n + 1) % N && live) { col = S.after; op = C.afterOp; }
+            else if (g.index === 0) { col = S.start; op = C.startOp; }
+            else { col = S.idle; op = C.idleOp; }
+            m.color.copy(col); m.opacity = op;
+            const fo = !live ? 0 : g.index === n ? C.fillNext : g.index === (n + 1) % N ? C.fillAfter : 0;
+            g.film.visible = fo > 0;
+            if (fo > 0) { g.filmOp.value = fo; g.filmCol.value.copy(g.index === n ? S.next : S.after); }
         }
+        const g = this.race.gates[n];
+        this.keyline.visible = live;
+        if (live) { this.keyline.geometry = g.keyGeo; this.keyline.position.copy(g.position); this.keyline.quaternion.copy(g.mesh.quaternion); }
+        this._gateD = live ? g.position.distanceTo(pos) : Infinity;
     }
 
-    // The path ahead: from the last gate (or the drone, before the start) through the next two.
-    _path(pos) {
-        const n = this.race.nextGate;
-        if (this._pathFor === n && this.pathMesh) return;
-        this._pathFor = n;
-        if (this.pathMesh) { this.group.remove(this.pathMesh); this.pathMesh.geometry.dispose(); }
+    // --- the path ahead ---------------------------------------------------------------------
+    // Two tubes per stretch: the line (accent to quiet along its length) and a fatter dark
+    // keyline seen only from inside (its back faces), so it rims the line. Both fade out within
+    // a metre of the camera (you fly along the line; close up the tube would fill the view).
+    // Built once per stretch and kept: a rebuild on every gate cost a ~20 ms frame.
+    _buildPath() {
+        this.pathA = uniform(new THREE.Color(C.path[0])); this.pathB = uniform(new THREE.Color(C.path[1])); this.pathKey = uniform(new THREE.Color(C.keyline));
+        const fade = smoothstep(0.35, 1.2, positionView.length());
+        this._pathMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false });
+        this._pathMat.colorNode = mix(this.pathA, this.pathB, uv().x); this._pathMat.opacityNode = float(C.pathOp).mul(fade);
+        this._pathKeyMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.BackSide });
+        this._pathKeyMat.colorNode = this.pathKey; this._pathKeyMat.opacityNode = float(C.pathKeylineOp).mul(fade);
+        this._paths = new Map(); this._pathOn = null; this._pathFor = null;
+        for (let n = 0; n < this.race.gates.length; n++) this._pathGroup(true, n, null);
+    }
+
+    _pathGroup(started, n, pos) {
+        const key = `${started}:${n}`;
+        let grp = this._paths.get(key);
+        if (grp) return grp;
         const G = this.race.gates, N = G.length;
-        const from = this.stage === 'racing' || this.stage === 'done' ? G[(n - 1 + N) % N].position.clone().addScaledVector(G[(n - 1 + N) % N].normal, LEAD) : new THREE.Vector3(pos.x, pos.y, pos.z);
         // The same flown line as the course check: via points (corners), lead-in, gate, lead-out.
-        const started = this.stage === 'racing' || this.stage === 'done';
-        // Before the start the line runs from the whoop straight to the first gate (its corner
-        // via points lie behind the spawn).
+        // Before the start it runs from the whoop straight to the first gate (its corner via
+        // points lie behind the spawn), beginning a third of the way there.
+        const tp = this.track.gates[(n - 1 + N) % N]; // the line's point in the last gate (not the frame's centre)
+        const from = started ? new THREE.Vector3(tp.x, tp.y, tp.z).addScaledVector(G[(n - 1 + N) % N].normal, LEAD) : new THREE.Vector3(pos.x, pos.y, pos.z);
         const raw = this.track.gates.map((g, i) => ({ ...g, _i: i, via: !started && i === n ? [] : g.via }));
         const pts = [from, ...linePoints(raw, THREE.Vector3, (g) => G[g._i].normal, n, 2)];
-        // Before the start, begin a third of the way to the first gate, not at the camera.
         if (!started) pts[0].lerp(pts[1], 0.35);
         const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
-        this.pathMesh = new THREE.Mesh(new THREE.TubeGeometry(curve, 120, 0.009, 5, false),
-            this._pathMat ??= Object.assign(new THREE.MeshBasicNodeMaterial({ color: 0xffa040, transparent: true, depthWrite: false }),
-                // Faded out within a metre of the camera: you fly along the line, and close up the
-                // thin tube would fill the view.
-                { opacityNode: float(0.45).mul(smoothstep(0.35, 1.2, positionView.length())) }));
-        this.group.add(this.pathMesh);
+        grp = new THREE.Group();
+        const key2 = new THREE.Mesh(new THREE.TubeGeometry(curve, 120, 0.016, 6, false), this._pathKeyMat); key2.renderOrder = -2;
+        grp.add(key2, new THREE.Mesh(new THREE.TubeGeometry(curve, 120, 0.009, 6, false), this._pathMat));
+        grp.visible = false; this.group.add(grp);
+        if (started) this._paths.set(key, grp); // the pre-start line depends on where the whoop sits
+        return grp;
+    }
+
+    _path(pos) {
+        const started = this.stage === 'racing' || this.stage === 'done', n = this.race.nextGate, key = `${started}:${n}`;
+        if (key === this._pathFor) return;
+        this._pathFor = key;
+        if (this._pathOn) { this._pathOn.visible = false; if (!this._paths.has(this._pathOnKey)) { this.group.remove(this._pathOn); this._pathOn.children.forEach((m) => m.geometry.dispose()); } }
+        this._pathOn = this._pathGroup(started, n, pos); this._pathOnKey = key; this._pathOn.visible = true;
     }
 
     // --- sound ---------------------------------------------------------------------------
@@ -146,58 +370,189 @@ export class TimeTrial {
 
     // --- HUD -----------------------------------------------------------------------------
     _buildHud() {
-        const css = document.createElement('style');
-        css.textContent = `
-#tt { position: fixed; top: 34px; left: 50%; transform: translateX(-50%); z-index: 5; text-align: center; pointer-events: none;
-  font: 13px/1.35 system-ui, sans-serif; color: #e8e8e8; text-shadow: 0 1px 2px #000, 0 0 6px #000; font-variant-numeric: tabular-nums; }
-#tt .t { font: 700 30px/1.1 system-ui, sans-serif; letter-spacing: 0.5px; color: #fff; }
-#tt .r { color: #cfcfcf; } #tt .r b { color: #fff; font-weight: 600; }
-#tt .d { font: 700 22px/1.2 system-ui, sans-serif; } #tt .d.ok { color: #3ad16f; } #tt .d.bad { color: #ff5a4a; }
-#tt .big { font: 800 56px/1 system-ui, sans-serif; color: #fff; margin-top: 2vh; }
-#tt .res { margin-top: 10px; background: rgba(20,20,20,0.85); border: 1px solid #000; padding: 10px 16px; text-align: left; min-width: 220px; }
-#tt .res div { display: flex; justify-content: space-between; gap: 24px; }
-#tt-arrow { position: fixed; left: 50%; top: 50%; width: 0; height: 0; z-index: 5; pointer-events: none;
-  border-left: 14px solid transparent; border-right: 14px solid transparent; border-bottom: 26px solid #ff7a00; filter: drop-shadow(0 0 3px #000); display: none; }`;
-        document.head.appendChild(css);
-        this.el = document.createElement('div'); this.el.id = 'tt'; document.body.appendChild(this.el);
+        const css = document.createElement('style'); css.textContent = CSS; document.head.appendChild(css);
+        this.el = document.createElement('div'); this.el.id = 'tt';
+        this.el.innerHTML = '<div class="title"></div><div class="count mid"><div class="pl"><div></div><div class="bar"><i></i></div></div></div>'
+            + '<div class="go mid"><div class="pl">Go<div class="bar"></div></div></div>'
+            + '<div class="clock"><div class="pl"></div><div class="delta"><div class="pl"></div></div></div><div class="dist pl"></div>'
+            + '<div class="lap mid"><div class="pl"><div class="top"><span class="n q"></span><span class="t"></span></div><div class="r"><span></span><span class="q"></span></div></div></div>'
+            + '<div class="final mid"><div class="pl">Final lap</div></div><div class="fin"></div>';
+        document.body.appendChild(this.el);
+        const $ = (s) => this.el.querySelector(s);
+        this.ui = {
+            title: $('.title'), count: $('.count'), countWord: $('.count .pl > div'), countBar: $('.count .bar i'), go: $('.go'),
+            clock: $('.clock'), clockT: $('.clock .pl'), dist: $('.dist'), lap: $('.lap'), lapN: $('.lap .n'), lapT: $('.lap .t'),
+            lapR: $('.lap .r'), lapD: $('.lap .r span'), lapB: $('.lap .r .q'), final: $('.final'), delta: $('.delta'), deltaT: $('.delta .pl'), fin: $('.fin'),
+        };
         this.arrow = document.createElement('div'); this.arrow.id = 'tt-arrow'; document.body.appendChild(this.arrow);
+        this._cache = new Map();
+        this._v3 = new THREE.Vector3();
+    }
+
+    // Write-on-change helpers: the DOM is touched only when a value differs from the last write.
+    _set(el, key, v, fn) { const k = this._cache.get(el) || {}; if (k[key] === v) return; k[key] = v; this._cache.set(el, k); fn(v); }
+    _show(el, on) { this._set(el, 'on', on, () => el.classList.toggle('on', on)); }
+    _text(el, s) { this._set(el, 'text', s, () => (el.textContent = s)); }
+    _html(el, s) { this._set(el, 'html', s, () => (el.innerHTML = s)); }
+    _cls(el, base, c) { this._set(el, 'cls', c, () => (el.className = `${base} ${c}`.trim())); }
+    _fx(el, op, tf) { this._set(el, 'op', op, () => (el.style.opacity = op)); this._set(el, 'tf', tf, () => (el.style.transform = tf)); }
+
+    _keys(pairs) { return `<div class="keys">${pairs.filter(([k]) => k).map(([k, w]) => `<span><b>${k}</b>${w}</span>`).join('')}</div>`; }
+    _head(text) { return `<div class="hd"><img src="brand/cuds-badge.png" alt="">${text}</div>`; }
+
+    // Top-down plan of the course (x right, z down, equal scale, so not mirrored): the gallery's
+    // surveyed outline (track.js), the gates as short bars across their openings, and either the
+    // planned line or the laps flown. The highlighted line runs accent to quiet like the path.
+    _plan(lines) {
+        const P = SPONZA_PLAN, pad = 0.1, x0 = P.x[0] - pad, z0 = P.z[0] - pad, W = P.x[1] - P.x[0] + 2 * pad, H = P.z[1] - P.z[0] + 2 * pad;
+        const k = 900 / W, X = (x) => ((x - x0) * k).toFixed(1), Z = (z) => ((z - z0) * k).toFixed(1);
+        const rect = (r) => `<rect class="wall" x="${X(r.x[0])}" y="${Z(r.z[0])}" width="${((r.x[1] - r.x[0]) * k).toFixed(1)}" height="${((r.z[1] - r.z[0]) * k).toFixed(1)}" stroke-width="1.5"/>`;
+        const id = `pg${this._planN = (this._planN || 0) + 1}`;
+        let s = `<svg viewBox="0 0 900 ${(H * k).toFixed(0)}"><defs><linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="900" y2="0">`
+            + `<stop offset="0" style="stop-color:var(--hud-accent)"/><stop offset="1" style="stop-color:var(--hud-quiet)"/></linearGradient></defs>${rect(P)}${rect(P.opening)}`;
+        for (const l of lines) {
+            const d = l.pts.map((p, i) => `${i ? 'L' : 'M'}${X(p[0])},${Z(p[1])}`).join('');
+            if (l.hi) s += `<path class="key" d="${d}" stroke-width="${l.w + 3}" stroke-opacity=".55"/><path class="line" d="${d}" style="stroke:url(#${id})" stroke-width="${l.w}"/>`;
+            else s += `<path class="line" d="${d}" stroke-width="${l.w}" stroke-opacity="${l.op}"/>`;
+        }
+        for (const g of this.race.gates) {
+            const r = g.halfW + 0.03, p = g.position, n = g.normal, h = Math.hypot(n.x, n.z) || 1, ax = n.z / h * r, az = -n.x / h * r;
+            s += `<line class="gate${g.index === 0 ? ' s' : ''}" x1="${X(p.x - ax)}" y1="${Z(p.z - az)}" x2="${X(p.x + ax)}" y2="${Z(p.z + az)}" stroke-width="${g.index === 0 ? 7 : 5}"/>`;
+        }
+        return s + '</svg>';
+    }
+
+    // The planned line: closed centripetal Catmull-Rom through every gate's via points, lead-in,
+    // gate and lead-out (track.js linePoints, as drawn ahead in flight).
+    _courseLine() {
+        const G = this.race.gates;
+        const raw = this.track.gates.map((g, i) => ({ ...g, _i: i }));
+        const pts = linePoints(raw, THREE.Vector3, (g) => G[g._i].normal);
+        return new THREE.CatmullRomCurve3(pts, true, 'centripetal').getPoints(400).map((p) => [p.x, p.z]);
+    }
+
+    _titleCard() {
+        const best = this.bestRun ? `, best <span>${formatTime(this.bestRun.ms)}</span>` : '';
+        // Key hints as one pair of keycaps: the arm key (or "Switch" when a radio arms it) and Menu.
+        const arm = this.keyLabel('arm') || 'Switch';
+        this._html(this.ui.title, '<img class="badge" src="brand/cuds-badge.png" alt="CUDS">' + `<div class="nm">${this.track.name}</div><div class="sub q lt">${this.laps} laps${best}</div>`
+            + this._plan([{ pts: this._courseLine(), w: 4, hi: true }])
+            + this._keys([[arm, 'Arm'], [this.keyLabel('menu'), 'Menu']])
+            + '<div class="cr q lt"><a href="https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza" target="_blank" rel="noopener">Sponza by Crytek (Frank Meinl, after Marko Dabrovic), PBR textures by Alexandre Pestana</a></div>');
+    }
+
+    _finishCard() {
+        const prev = this.bestRun?.ms, tot = this.total, isNew = prev == null || tot < prev;
+        const bestLap = Math.min(...this.lapTimes);
+        let h = '<div class="panel"></div><div class="body">' + this._head(`<span>${this.track.name}, ${this.laps} laps</span>`);
+        if (isNew) h += '<div class="nb q">New best</div>';
+        h += `<div class="tot">${formatTime(tot)}</div>`;
+        if (prev != null) h += `<div class="dl"><span class="${deltaCls(tot - prev)}">${deltaText(tot - prev)}</span><span class="q">${isNew ? 'was' : 'best'} ${formatTime(prev)}</span></div>`;
+        h += '<div class="laps">' + this.lapTimes.map((ms, i) => `<div${ms === bestLap ? ' class="best"' : ''}><span>${i + 1}</span><span>${formatTime(ms)}</span>${ms === bestLap ? '<em>best lap</em>' : ''}</div>`).join('') + '</div></div>';
+        const lines = this.runLaps.map((pts, i) => (this.lapTimes[i] === bestLap ? { pts, w: 4, hi: true } : { pts, w: 1.6, op: 0.35 }));
+        lines.sort((a, b) => !!a.hi - !!b.hi); // best lap drawn last, on top
+        h += this._plan(lines);
+        h += this._keys([[this.keyLabel('reset'), 'Retry'], [this.keyLabel('menu'), 'Menu']]);
+        this._html(this.ui.fin, h);
+        if (isNew) {
+            this.bestRun = { ms: tot, laps: this.lapTimes.slice() };
+            try { localStorage.setItem(this.runKey, JSON.stringify(this.bestRun)); } catch { /* storage full */ }
+        }
     }
 
     _hud(now) {
-        const r = this.race, st = r.status(), N = r.gates.length;
-        let h = '';
-        if (this.stage === 'idle') h = `<div class="t">Arm to start</div><div class="r">${this.track.name}, ${this.laps} laps</div>`;
-        else if (this.stage === 'countdown') h = `<div class="big">${this.count > 0 ? this.count : ''}</div>`;
-        else {
-            const lapNo = Math.min(st.lap, this.laps);
-            const t = r.state === 'RACING' && this.stage === 'racing' ? formatTime(st.currentMs) : this.stage === 'done' ? formatTime(this.total) : formatTime(now - this.goAt);
-            h = `<div class="t">${t}</div><div class="r">Lap <b>${lapNo}/${this.laps}</b>   Gate <b>${st.nextGate}/${N}</b></div>`
-                + `<div class="r">Last <b>${formatTime(st.lastMs)}</b>   Best <b>${formatTime(this.best?.ms ?? NaN)}</b></div>`;
-            if (this.holeshot != null) h += `<div class="r">Holeshot <b>${(this.holeshot / 1000).toFixed(2)}</b></div>`;
-            if (this.delta && now < this.delta.until) h += `<div class="d ${this.delta.d <= 0 ? 'ok' : 'bad'}">${this.delta.d < 0 ? '-' : '+'}${(Math.abs(this.delta.d) / 1000).toFixed(2)}</div>`;
-            if (this.stage === 'go' && now - this.goAt < 800) h += '<div class="big">GO</div>';
-            if (this.stage === 'done') {
-                h += `<div class="res">${this.lapTimes.map((ms, i) => `<div><span>Lap ${i + 1}</span><b>${formatTime(ms)}</b></div>`).join('')}`
-                    + `<div><span>Total</span><b>${formatTime(this.total)}</b></div><div><span>Best lap</span><b>${formatTime(Math.min(...this.lapTimes))}</b></div>`
-                    + `<div><span>Space</span><span>restart</span></div></div>`;
+        const u = this.ui, st = this.stage;
+        const unit = Math.min(innerWidth / 1280, innerHeight / 720);
+        // Title card: only before arming.
+        this._show(u.title, st === 'idle');
+        // Ready: for the second before Go, the bar filling towards it.
+        this._show(u.count, st === 'countdown');
+        if (st === 'countdown') { this._text(u.countWord, 'Ready'); this._fx(u.countBar, '1', `scaleX(${clamp01((now - this.t0) / READY_MS).toFixed(2)})`); }
+        // Go: held 0.6 s, then gone in two frames (a quick scale-out).
+        const tg = (now - this.goAt) / 1000, goOn = (st === 'go' || st === 'racing') && tg >= 0 && tg < 0.64;
+        this._show(u.go, goOn);
+        if (goOn) { const e = clamp01((tg - 0.6) / 0.04); this._fx(u.go, e ? (1 - e).toFixed(2) : '1', e ? `scale(${(1 + 0.35 * e).toFixed(3)})` : 'none'); }
+        // Clock: the run time, from the first start/finish crossing (0:00.000 from Go until then);
+        // the finish card replaces it.
+        const clockOn = st === 'go' || st === 'racing';
+        this._show(u.clock, clockOn);
+        if (clockOn) this._text(u.clockT, formatTime(st === 'racing' ? this.race.clock * 1000 : 0));
+        // Distance to the next gate, beside its top corner.
+        this._distance(st !== 'done', unit);
+        // Gate pass: the delta to the best lap's split, in a row joined under the clock, for 3 s
+        // (in over 120 ms, out over 250 ms); the clock plate's bottom corners square off meanwhile.
+        const dl = this.delta, dt = dl ? (now - dl.at) / 1000 : 99, dOn = clockOn && dt >= 0 && dt < 3.25;
+        this._show(u.delta, dOn);
+        this._set(u.clock, 'wd', dOn, (v) => u.clock.classList.toggle('wd', v));
+        if (dOn) {
+            this._text(u.deltaT, dl.text); this._cls(u.deltaT, 'pl', dl.cls);
+            this._fx(u.delta, Math.min(1, dt / 0.12, (3.25 - dt) / 0.25).toFixed(2), 'none');
+        }
+        // Lap complete: lap number and time bottom centre, the delta a beat later; held 3 s, then
+        // it fades. After the second-last lap, "Final lap" follows. body.tt-lap-on while it shows.
+        const L = this.lapMoment, lt = L ? (now - L.at) / 1000 : 99, lOn = lt >= 0.1 && lt < 3.35;
+        this._show(u.lap, lOn);
+        this._set(document.body, 'tt-lap-on', lOn, (v) => document.body.classList.toggle('tt-lap-on', v));
+        if (lOn) {
+            this._text(u.lapT, formatTime(L.ms)); this._text(u.lapN, `Lap ${L.n}`);
+            this._text(u.lapD, L.d == null ? '' : deltaText(L.d)); this._cls(u.lapD, '', L.d == null ? '' : deltaCls(L.d));
+            this._text(u.lapB, L.prev == null ? '' : `best ${formatTime(L.prev)}`);
+            this._set(u.lapR, 'on', L.d != null || L.prev != null, (v) => (u.lapR.style.display = v ? '' : 'none'));
+            this._set(u.lapD, 'vis', lt >= 0.5, (v) => (u.lapD.style.visibility = v ? 'inherit' : 'hidden'));
+            // In: opacity and a 4u rise over 160 ms (ease-out); out: opacity over 250 ms.
+            const a = ease(clamp01((lt - 0.1) / 0.16)), z = clamp01((lt - 3.1) / 0.25);
+            this._fx(u.lap, (a * (1 - z)).toFixed(2), a < 1 ? `translateY(${(4 * (1 - a) * unit).toFixed(1)}px)` : 'none');
+        }
+        const fOn = !!L?.final && lt >= 3.4 && lt < 4.4;
+        this._show(u.final, fOn);
+        if (fOn) { const a = clamp01((lt - 3.4) / 0.12), z = clamp01((lt - 4.25) / 0.15); this._fx(u.final, (a * (1 - z)).toFixed(2), `scale(${(1.06 - 0.06 * ease(a)).toFixed(3)})`); }
+        // Finish: the result card fades in over the run.
+        const ft = st === 'done' ? (now - this.doneAt) / 1000 : -1;
+        this._show(u.fin, ft >= 0.3);
+        if (ft >= 0.3) this._fx(u.fin, clamp01((ft - 0.3) / 0.4).toFixed(2), 'none');
+        // Off-screen next gate: arrow at the screen edge.
+        const ang = st === 'done' || this._onScreen ? null : this.race.pointerAngle(this.camera);
+        this._set(this.arrow, 'on', ang !== null, (on) => (this.arrow.style.display = on ? 'block' : 'none'));
+        if (ang !== null) {
+            const R = Math.min(innerWidth, innerHeight) * 0.3; // clear of the clock at the top
+            this._set(this.arrow, 'tf', `translate(${(Math.sin(ang) * R - 14).toFixed(1)}px, ${(-Math.cos(ang) * R - 13).toFixed(1)}px) rotate(${ang.toFixed(3)}rad)`, (v) => (this.arrow.style.transform = v));
+        }
+    }
+
+    // The next gate's distance, beside the top-right corner of its frame on screen.
+    _distance(live, unit) {
+        const u = this.ui, g = this.race.gates[this.race.nextGate], cam = this.camera;
+        cam.updateMatrixWorld(); // FPV camera hangs off the airframe; refresh before projecting
+        const c = this._v3.copy(g.position).project(cam);
+        this._onScreen = c.z < 1 && c.z > -1 && Math.abs(c.x) < 0.95 && Math.abs(c.y) < 0.95;
+        let on = live && this._gateD > 1.5 && this._gateD < 60;
+        if (on) {
+            const v = this._v3, q = g.mesh.quaternion, rx = g.halfW + 0.04, ry = g.halfH + 0.04;
+            let mx = -Infinity, my = Infinity;
+            for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+                v.set(sx * rx, sy * ry, 0).applyQuaternion(q).add(g.position).project(cam);
+                if (v.z > 1 || v.z < -1) { on = false; break; }
+                mx = Math.max(mx, v.x); my = Math.min(my, -v.y);
+            }
+            if (on) {
+                const x = (mx + 1) / 2 * innerWidth + 10 * unit, y = (my + 1) / 2 * innerHeight - 2 * unit;
+                on = x > 0 && x < innerWidth - 40 * unit && y > 0 && y < innerHeight;
+                if (on) {
+                    this._text(u.dist, `${Math.max(1, Math.round(this._gateD))} m`);
+                    this._set(u.dist, 'tf', `translate3d(${x.toFixed(0)}px,${y.toFixed(0)}px,0)`, (t) => (u.dist.style.transform = t));
+                }
             }
         }
-        if (h !== this._lastHud) { this.el.innerHTML = h; this._lastHud = h; }
-        // Off-screen next gate: arrow at the screen edge.
-        const ang = this.stage === 'done' ? null : r.pointerAngle(this.camera);
-        if (ang === null) this.arrow.style.display = 'none';
-        else {
-            const R = Math.min(innerWidth, innerHeight) * 0.3; // clear of the timer at the top
-            this.arrow.style.display = 'block';
-            this.arrow.style.transform = `translate(${Math.sin(ang) * R - 14}px, ${-Math.cos(ang) * R - 13}px) rotate(${ang}rad)`;
-        }
+        this._show(u.dist, on);
     }
 
     // --- run -----------------------------------------------------------------------------
     reset() {
         this.race.resetRun();
-        this.stage = 'idle'; this.count = 0; this.goAt = 0; this.holeshot = null; this.lapTimes = []; this.total = 0;
-        this.delta = null; this.splits = []; this.path = []; this._pathFor = -2; this._hadArm = false;
+        this.stage = 'idle'; this.goAt = -1e9; this.doneAt = 0; this.holeshot = null; this.lapTimes = []; this.total = 0;
+        this.delta = null; this.lapMoment = null; this.splits = []; this.path = []; this.runLaps = []; this._lapLine = []; this._pathFor = null; this._hadArm = false;
+        this.moments = {};
+        this._titleCard();
         try { speechSynthesis.cancel(); } catch { /* */ }
     }
 
@@ -207,35 +562,35 @@ export class TimeTrial {
     update(dt, now, pos, armed) {
         const r = this.race;
         if (this.stage === 'idle') {
+            this.moments.title ??= now;
             // Start on arming (a fresh arm, so a run doesn't start by itself after a reset).
-            if (this._hadArm === false && armed) { this.stage = 'countdown'; this.t0 = now; this.ticks = 0; this.hold = 1000 + Math.random() * 4000; }
+            if (this._hadArm === false && armed) { this.stage = 'countdown'; this.t0 = now; this.moments.countdown = now; }
             this._hadArm = armed;
         }
         if (this.stage === 'countdown') {
-            const e = now - this.t0;
-            while (this.ticks < 3 && e >= this.ticks * 1000) { this._tone(440, 0, 0.1, { type: 'triangle', gain: 0.35 }); this.ticks++; this.count = 4 - this.ticks; }
-            if (e >= 2000 + 400) this.count = 0; // after the third tick: an unpredictable hold
-            if (e >= 2000 + this.hold) { this.stage = 'go'; this.goAt = now; this._tone(880, 0, 0.7, { type: 'triangle', gain: 0.4, fade: 0.25 }); }
+            if (now - this.t0 >= READY_MS) { this.stage = 'go'; this.goAt = now; this.moments.go = now; this._tone(880, 0, 0.7, { type: 'triangle', gain: 0.4, fade: 0.25 }); }
         }
         if (this.stage === 'go' || this.stage === 'racing') {
             const next = r.gates[r.nextGate], prevD = this._prevD;
             r.update(pos, dt);
             // Wrong way through the next gate: flash it red and buzz.
             const d = (pos.x - next.position.x) * next.normal.x + (pos.y - next.position.y) * next.normal.y + (pos.z - next.position.z) * next.normal.z;
-            if (prevD !== undefined && prevD > 0 && d <= 0 && next.position.distanceTo(pos) < this.track.gateRadius * 1.5 && now > next.wrongUntil) { next.wrongUntil = now + 600; this._buzz(); }
+            if (prevD !== undefined && prevD > 0 && d <= 0 && next.position.distanceTo(pos) < Math.max(next.halfW, next.halfH) * 1.3 && now > next.wrongUntil) { next.wrongUntil = now + 600; this._buzz(); }
             this._prevD = r.gates[r.nextGate] === next ? d : undefined;
-            for (const e of r.consumeEvents()) this._event(e, now);
+            for (const e of r.consumeEvents()) this._event(e, now, next);
             if (this.stage === 'racing') {
                 const ms = r.currentLapMs;
                 const l = this.path[this.path.length - 1];
-                if (!l || ms - l[3] > 40) this.path.push([+pos.x.toFixed(3), +pos.y.toFixed(3), +pos.z.toFixed(3), Math.round(ms)]);
+                if (!l || ms - l[3] > 40) { this.path.push([+pos.x.toFixed(3), +pos.y.toFixed(3), +pos.z.toFixed(3), Math.round(ms)]); this._lapLine.push([pos.x, pos.z]); }
                 this._ghost(ms);
             }
         }
-        this._colour(now);
+        this._colour(now, pos);
         this._path(pos);
-        this._hud(now);
     }
+
+    // Per frame, after the camera has followed the airframe: the HUD (it projects the gate).
+    draw(now) { this._hud(now); }
 
     _ghost(ms) {
         const p = this.best?.path;
@@ -248,26 +603,35 @@ export class TimeTrial {
         this.ghostMesh.visible = ms <= p[p.length - 1][3];
     }
 
-    _event(e, now) {
+    _event(e, now, gate) {
+        if (gate) gate.flashUntil = now + 200; // the passed frame flares white for a beat
         if (e.type === 'start') {
-            this.stage = 'racing'; this.holeshot = now - this.goAt; this.splits = []; this.path = []; this._gi = 0;
+            this.stage = 'racing'; this.holeshot = now - this.goAt; this.splits = []; this.path = []; this._lapLine = []; this._gi = 0;
+            this.moments.start = now;
             this._blip([[1320, 0, 0.07]]);
         } else if (e.type === 'gate') {
             const t = this.race.currentLapMs, b = this.best?.splits?.[this.splits.length];
             this.splits.push(Math.round(t));
-            this.delta = b != null ? { d: t - b, until: now + 1500 } : null;
+            this.delta = b != null ? { text: deltaText(t - b), cls: deltaCls(t - b), at: now } : null;
+            this.moments[`g${this.lapTimes.length + 1}.${this.splits.length}`] = now;
             this._blip([[1320, 0, 0.07]]);
         } else if (e.type === 'lap') {
             this.lapTimes.push(e.ms);
-            const prev = this.best?.ms, isBest = prev == null || e.ms < prev;
-            this.delta = prev != null ? { d: e.ms - prev, until: now + 2500 } : null;
+            this._lapLine.push([this.race.gates[0].position.x, this.race.gates[0].position.z]);
+            this.runLaps.push(this._lapLine); this._lapLine = [[this.race.gates[0].position.x, this.race.gates[0].position.z]];
+            const prev = this.best?.ms, isBest = prev == null || e.ms < prev, n = this.lapTimes.length;
+            this.delta = null;
+            this.lapMoment = { n, ms: e.ms, d: prev != null ? e.ms - prev : null, prev, at: now, final: n === this.laps - 1 };
+            this.moments[`lap${n}`] = now;
             if (isBest) {
                 this.best = { ms: e.ms, splits: this.splits.slice(), path: this.path.slice() };
                 try { localStorage.setItem(this.bestKey, JSON.stringify(this.best)); } catch { /* storage full */ }
             }
             this.splits = []; this.path = []; this._gi = 0;
-            if (this.lapTimes.length >= this.laps) {
-                this.stage = 'done'; this.total = this.lapTimes.reduce((a, b) => a + b, 0);
+            if (n >= this.laps) {
+                this.stage = 'done'; this.doneAt = now; this.moments.done = now; this.lapMoment = null;
+                this.total = this.lapTimes.reduce((a, b) => a + b, 0);
+                this._finishCard();
                 [[1200, 0, 0.05], [1800, 0.05, 0.075], [1200, 0.15, 0.05], [1800, 0.2, 0.075], [1200, 0.3, 0.05], [1800, 0.35, 0.1]].forEach(([f, at, len]) => this._tone(f, at, len, { type: 'square', gain: 0.12 }));
                 say(`Race complete. Total ${secs(this.total)}. Best lap ${secs(Math.min(...this.lapTimes))}`);
             } else if (isBest) {
