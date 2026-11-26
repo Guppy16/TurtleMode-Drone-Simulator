@@ -7,10 +7,16 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT=assets/models/sponza; mkdir -p "$OUT"
 BASE=https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Sponza/glTF
-curl -s -A "Mozilla/5.0 (asset-fetch)" "https://api.github.com/repos/KhronosGroup/glTF-Sample-Assets/contents/Models/Sponza/glTF" \
-  | python3 -c "import json,sys;[print(e['name']) for e in json.load(sys.stdin)]" | while read -r f; do
-  [ -s "$OUT/$f" ] || curl -sf -A "Mozilla/5.0 (asset-fetch)" -o "$OUT/$f" "$BASE/$f"
-done
+get() { [ -s "$OUT/$1" ] || curl -sSf --retry 3 -A "Mozilla/5.0 (asset-fetch)" -o "$OUT/$1" "$BASE/$1"; }
+# The file list comes from the glTF itself: no GitHub API call, which is rate-limited without a
+# token (shared CI runners hit the limit).
+get Sponza.gltf
+python3 -I - "$OUT/Sponza.gltf" <<'PY' | while read -r f; do get "$f"; done
+import json, sys
+g = json.load(open(sys.argv[1]))
+for x in g.get('buffers', []) + g.get('images', []):
+    if 'uri' in x and not x['uri'].startswith('data:'): print(x['uri'])
+PY
 du -sh "$OUT"
 # Optional, for speed: GPU-compressed textures (DXT1/DXT5 .dds with mips) next to the model.
 #   python3 tools/assets/dds_encode.py assets/models/sponza/dds assets/models/sponza/*.{png,jpg} --linear <non-colour maps>
