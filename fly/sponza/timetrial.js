@@ -2,7 +2,7 @@
 // race timers and sims do (research notes: MultiGP, RotorHazard, Velocidrone manual):
 // - Start: a quick one, as the user asked: arming shows "Ready" for a second, then "Go" with
 //   RotorHazard's 880 Hz start tone (0.7 s). The whoop is held until Go. Holeshot = Go to the
-//   first start/finish crossing; the clock starts there (MultiGP). Runs are 3 laps.
+//   first start/finish crossing; the clock starts there (MultiGP). Runs are 2 laps (track.js).
 // - Gates: square frames. The next gate in the accent with a dark keyline, the one after it in
 //   the quiet colour, the rest faint white; start/finish has a chequered top bar. A gate flares
 //   white as you pass it; flying the next gate the wrong way flashes it red and buzzes; an arrow
@@ -12,7 +12,7 @@
 // - Sounds: gate tick 1 kHz with a pitch ladder; lap chime 660/990 Hz plus the time spoken;
 //   best lap 1200/1800 Hz square (RotorHazard's leader tone) plus speech; finish pattern.
 // - Best lap stored in the browser (per track): its split at every gate and its flight path,
-//   replayed as a ghost whoop. The best 3-lap total is stored separately for the title card.
+//   replayed as a ghost whoop. The best run total (per lap count) is stored separately for the title card.
 // - HUD (moment-based): mid-flight only the running clock, the next gate's distance and the
 //   camera angle (controls.js). Everything else appears at its moment and leaves: title card
 //   before the run, Ready / Go, the delta to the best lap's split at each gate (small,
@@ -23,7 +23,7 @@
 //   offline recorder steps it), and the DOM is written only when a value changes, with
 //   transforms and opacity for motion.
 import * as THREE from 'three/webgpu';
-import { positionView, smoothstep, float, uv, mix, uniform } from 'three/tsl';
+import { positionView, smoothstep, float, uv, mix, uniform, length } from 'three/tsl';
 import { formatTime } from '../../js/tracks.js?v=36';
 import { linePoints, LEAD, SPONZA_PLAN } from './track.js';
 
@@ -32,6 +32,7 @@ import { linePoints, LEAD, SPONZA_PLAN } from './track.js';
 export const GATE_COLOURS = {
     next: 0x00d3f0, after: 0xa3c1ad, idle: 0xffffff, start: 0xffffff, wrong: 0xff6b57, flash: 0xffffff, keyline: 0x14140a,
     nextOp: 1, afterOp: 0.9, idleOp: 0.22, startOp: 0.55, keylineOp: 0.55,
+    fillNext: 0.15, fillAfter: 0.075, // the faint film across the opening: next gate (accent), gate after (quiet); none on the rest
     path: [0x00d3f0, 0xa3c1ad], pathOp: 0.95, pathKeylineOp: 0.5, ghost: 0xa3c1ad,
 };
 const C = GATE_COLOURS;
@@ -177,7 +178,7 @@ export class TimeTrial {
         this.laps = track.laps || 3;
         this.group = race.group;
         this.bestKey = `tm.sponza.best.${track.id}`;
-        this.runKey = `tm.sponza.bestRun.${track.id}`;
+        this.runKey = `tm.sponza.bestRun.${track.id}.${this.laps}`; // a best total only compares with runs of as many laps
         try { this.best = JSON.parse(localStorage.getItem(this.bestKey) || 'null'); } catch { this.best = null; }
         try { this.bestRun = JSON.parse(localStorage.getItem(this.runKey) || 'null'); } catch { this.bestRun = null; }
         this._sc = {}; this._scKey = '';
@@ -195,13 +196,15 @@ export class TimeTrial {
 
     // --- gates ---------------------------------------------------------------------------
     _buildGates() {
-        const half = this.track.gateRadius, bar = 0.045, o = half + bar / 2;
-        const frameGeo = (b) => {
-            const oo = half + b / 2, parts = [
-                new THREE.BoxGeometry(2 * half + 2 * b, b, b).translate(0, oo, 0),
-                new THREE.BoxGeometry(2 * half + 2 * b, b, b).translate(0, -oo, 0),
-                new THREE.BoxGeometry(b, 2 * half, b).translate(oo, 0, 0),
-                new THREE.BoxGeometry(b, 2 * half, b).translate(-oo, 0, 0),
+        // Thin bars (27 mm) round each gate's opening (halfW x halfH, RaceManager's pass test),
+        // outside it.
+        const bar = 0.027;
+        const frameGeo = (b, hw, hh) => {
+            const ox = hw + b / 2, oy = hh + b / 2, parts = [
+                new THREE.BoxGeometry(2 * hw + 2 * b, b, b).translate(0, oy, 0),
+                new THREE.BoxGeometry(2 * hw + 2 * b, b, b).translate(0, -oy, 0),
+                new THREE.BoxGeometry(b, 2 * hh, b).translate(ox, 0, 0),
+                new THREE.BoxGeometry(b, 2 * hh, b).translate(-ox, 0, 0),
             ];
             const pos = [], idx = []; let base = 0;
             for (const p of parts) { const ni = p.index.array, pa = p.attributes.position.array; pos.push(...pa); for (const k of ni) idx.push(k + base); base += pa.length / 3; p.dispose(); }
@@ -212,10 +215,22 @@ export class TimeTrial {
         const cx = cv.getContext('2d');
         for (let i = 0; i < 16; i++) for (let j = 0; j < 2; j++) { cx.fillStyle = (i + j) % 2 ? '#111' : '#fff'; cx.fillRect(i * 4, j * 4, 4, 4); }
         const chk = new THREE.CanvasTexture(cv); chk.colorSpace = THREE.SRGBColorSpace; chk.magFilter = THREE.NearestFilter;
-        const geo = frameGeo(bar);
+        // The film: a translucent plane exactly filling each opening, like a faint fog you fly
+        // through: unlit, both sides, no depth write, a little thinner towards the edges, and
+        // gone within ~1.5 m of the lens (as the path is) so it never washes the screen.
+        const filmFade = smoothstep(0.4, 1.5, positionView.length()), filmEdge = float(1).sub(smoothstep(0.25, 0.75, length(uv().sub(0.5))).mul(0.45));
+        const kmat = new THREE.MeshBasicNodeMaterial({ color: C.keyline, transparent: true, opacity: C.keylineOp, depthWrite: false });
         for (const g of this.race.gates) {
             g.mesh.geometry.dispose();
-            g.mesh.geometry = geo;
+            g.mesh.geometry = frameGeo(bar, g.halfW, g.halfH);
+            // The keyline for when it is the next gate: a wider dark frame drawn first, without
+            // depth, so the accent frame covers its middle and it rims both edges.
+            g.keyGeo = frameGeo(bar + 0.024, g.halfW - 0.012, g.halfH - 0.012);
+            g.filmOp = uniform(0); g.filmCol = uniform(new THREE.Color(C.next));
+            const fm = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
+            fm.colorNode = g.filmCol; fm.opacityNode = g.filmOp.mul(filmEdge).mul(filmFade);
+            g.film = new THREE.Mesh(new THREE.PlaneGeometry(2 * g.halfW, 2 * g.halfH), fm);
+            g.film.renderOrder = -3; g.film.visible = false; g.mesh.add(g.film);
             g.mesh.material.dispose();
             g.mesh.material = new THREE.MeshBasicNodeMaterial({ color: C.idle, transparent: true, opacity: 1 });
             // RaceManager orients the mesh's +Z onto the gate normal; keep the frame upright.
@@ -223,15 +238,15 @@ export class TimeTrial {
             g.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, n));
             g.label.visible = false; // no text on gates
             if (g.index === 0) {
-                const top = new THREE.Mesh(new THREE.BoxGeometry(2 * half + 2 * bar + 0.002, bar + 0.012, bar + 0.012), new THREE.MeshBasicNodeMaterial({ map: chk }));
-                top.position.set(0, o, 0); g.mesh.add(top);
+                const top = new THREE.Mesh(new THREE.BoxGeometry(2 * g.halfW + 2 * bar + 0.002, bar + 0.012, bar + 0.012), new THREE.MeshBasicNodeMaterial({ map: chk }));
+                chk.repeat.set(Math.max(1, Math.round(g.halfW / 0.5)), 1); chk.wrapS = THREE.RepeatWrapping;
+                top.position.set(0, g.halfH + bar / 2, 0); g.mesh.add(top);
             }
             g.wrongUntil = 0; g.flashUntil = 0;
         }
-        // The next gate's keyline: a thicker dark frame drawn first, without depth, so the accent
-        // frame covers its middle and it shows as an outline (it reads on bright stone).
-        this.keyline = new THREE.Mesh(frameGeo(bar * 1.9), new THREE.MeshBasicNodeMaterial({ color: C.keyline, transparent: true, opacity: C.keylineOp, depthWrite: false }));
+        this.keyline = new THREE.Mesh(this.race.gates[0].keyGeo, kmat);
         this.keyline.renderOrder = -1; this.keyline.visible = false; this.group.add(this.keyline);
+
     }
 
     // Colours for the scene's current tone mapping, recomputed when the exposure moves.
@@ -258,10 +273,13 @@ export class TimeTrial {
             else if (g.index === 0) { col = S.start; op = C.startOp; }
             else { col = S.idle; op = C.idleOp; }
             m.color.copy(col); m.opacity = op;
+            const fo = !live ? 0 : g.index === n ? C.fillNext : g.index === (n + 1) % N ? C.fillAfter : 0;
+            g.film.visible = fo > 0;
+            if (fo > 0) { g.filmOp.value = fo; g.filmCol.value.copy(g.index === n ? S.next : S.after); }
         }
         const g = this.race.gates[n];
         this.keyline.visible = live;
-        if (live) { this.keyline.position.copy(g.position); this.keyline.quaternion.copy(g.mesh.quaternion); }
+        if (live) { this.keyline.geometry = g.keyGeo; this.keyline.position.copy(g.position); this.keyline.quaternion.copy(g.mesh.quaternion); }
         this._gateD = live ? g.position.distanceTo(pos) : Infinity;
     }
 
@@ -289,7 +307,8 @@ export class TimeTrial {
         // The same flown line as the course check: via points (corners), lead-in, gate, lead-out.
         // Before the start it runs from the whoop straight to the first gate (its corner via
         // points lie behind the spawn), beginning a third of the way there.
-        const from = started ? G[(n - 1 + N) % N].position.clone().addScaledVector(G[(n - 1 + N) % N].normal, LEAD) : new THREE.Vector3(pos.x, pos.y, pos.z);
+        const tp = this.track.gates[(n - 1 + N) % N]; // the line's point in the last gate (not the frame's centre)
+        const from = started ? new THREE.Vector3(tp.x, tp.y, tp.z).addScaledVector(G[(n - 1 + N) % N].normal, LEAD) : new THREE.Vector3(pos.x, pos.y, pos.z);
         const raw = this.track.gates.map((g, i) => ({ ...g, _i: i, via: !started && i === n ? [] : g.via }));
         const pts = [from, ...linePoints(raw, THREE.Vector3, (g) => G[g._i].normal, n, 2)];
         if (!started) pts[0].lerp(pts[1], 0.35);
@@ -384,9 +403,8 @@ export class TimeTrial {
             if (l.hi) s += `<path class="key" d="${d}" stroke-width="${l.w + 3}" stroke-opacity=".55"/><path class="line" d="${d}" style="stroke:url(#${id})" stroke-width="${l.w}"/>`;
             else s += `<path class="line" d="${d}" stroke-width="${l.w}" stroke-opacity="${l.op}"/>`;
         }
-        const r = this.track.gateRadius;
         for (const g of this.race.gates) {
-            const p = g.position, n = g.normal, h = Math.hypot(n.x, n.z) || 1, ax = n.z / h * r * 1.3, az = -n.x / h * r * 1.3;
+            const r = g.halfW + 0.03, p = g.position, n = g.normal, h = Math.hypot(n.x, n.z) || 1, ax = n.z / h * r, az = -n.x / h * r;
             s += `<line class="gate${g.index === 0 ? ' s' : ''}" x1="${X(p.x - ax)}" y1="${Z(p.z - az)}" x2="${X(p.x + ax)}" y2="${Z(p.z + az)}" stroke-width="${g.index === 0 ? 7 : 5}"/>`;
         }
         return s + '</svg>';
@@ -494,10 +512,10 @@ export class TimeTrial {
         this._onScreen = c.z < 1 && c.z > -1 && Math.abs(c.x) < 0.95 && Math.abs(c.y) < 0.95;
         let on = live && this._gateD > 1.5 && this._gateD < 60;
         if (on) {
-            const r = this.track.gateRadius, v = this._v3, q = g.mesh.quaternion;
+            const v = this._v3, q = g.mesh.quaternion, rx = g.halfW + 0.04, ry = g.halfH + 0.04;
             let mx = -Infinity, my = Infinity;
             for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
-                v.set(sx * r * 1.09, sy * r * 1.09, 0).applyQuaternion(q).add(g.position).project(cam);
+                v.set(sx * rx, sy * ry, 0).applyQuaternion(q).add(g.position).project(cam);
                 if (v.z > 1 || v.z < -1) { on = false; break; }
                 mx = Math.max(mx, v.x); my = Math.min(my, -v.y);
             }
@@ -542,7 +560,7 @@ export class TimeTrial {
             r.update(pos, dt);
             // Wrong way through the next gate: flash it red and buzz.
             const d = (pos.x - next.position.x) * next.normal.x + (pos.y - next.position.y) * next.normal.y + (pos.z - next.position.z) * next.normal.z;
-            if (prevD !== undefined && prevD > 0 && d <= 0 && next.position.distanceTo(pos) < this.track.gateRadius * 1.5 && now > next.wrongUntil) { next.wrongUntil = now + 600; this._buzz(); }
+            if (prevD !== undefined && prevD > 0 && d <= 0 && next.position.distanceTo(pos) < Math.max(next.halfW, next.halfH) * 1.3 && now > next.wrongUntil) { next.wrongUntil = now + 600; this._buzz(); }
             this._prevD = r.gates[r.nextGate] === next ? d : undefined;
             for (const e of r.consumeEvents()) this._event(e, now, next);
             if (this.stage === 'racing') {
