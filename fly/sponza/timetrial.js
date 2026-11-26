@@ -43,9 +43,9 @@ const say = (text) => {
 const READY_MS = 1000; // "Ready" before "Go"
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
 const ease = (x) => 1 - (1 - x) * (1 - x);
-// Deltas: at most two significant figures (-0.18, +0.4, -1.2, +12), a true minus sign, green
+// Deltas: at most two significant figures and two decimals (+0.01, -0.18, +0.4, -1.2, +12), a true minus sign, green
 // when faster; judged on the value shown, so 0 is neither.
-const deltaVal = (d) => (d === 0 ? 0 : Math.sign(d) * Number((Math.abs(Math.round(d)) / 1000).toPrecision(2)));
+const deltaVal = (d) => (d === 0 ? 0 : Math.sign(d) * Math.round(Number((Math.abs(Math.round(d)) / 1000).toPrecision(2)) * 100) / 100);
 const deltaText = (d) => { const v = deltaVal(d); return `${v < 0 ? '−' : v > 0 ? '+' : ''}${Math.abs(v)}`; };
 const deltaCls = (d) => { const v = deltaVal(d); return v < 0 ? 'good' : v > 0 ? 'bad' : ''; };
 
@@ -111,22 +111,29 @@ const CSS = `
 #tt .delta { top: calc(61 * var(--hud-u)); will-change: opacity; }
 #tt .delta > .pl { padding: calc(1 * var(--hud-u)) calc(9 * var(--hud-u)) calc(2 * var(--hud-u)); font-size: calc(17 * var(--hud-u)); line-height: calc(22 * var(--hud-u)); }
 #tt .dist { left: 0; top: 0; padding: 0 calc(6 * var(--hud-u)); font-size: calc(14 * var(--hud-u)); line-height: calc(20 * var(--hud-u)); font-weight: var(--hud-w-light); will-change: transform; }
-#tt .title { left: calc(48 * var(--hud-u)); top: calc(40 * var(--hud-u)); padding: calc(20 * var(--hud-u)) calc(24 * var(--hud-u)) calc(22 * var(--hud-u)); }
+/* Title card: no plate, one left edge, the type carried by a soft shadow. */
+#tt .title { left: calc(56 * var(--hud-u)); top: calc(48 * var(--hud-u)); text-shadow: var(--hud-title-shadow); }
+#tt .title > * { display: block; margin: 0; }
+#tt .title .badge { height: calc(44 * var(--hud-u)); width: auto; margin-left: calc(-4 * var(--hud-u)); filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
+#tt .title .nm { margin-top: calc(14 * var(--hud-u)); font-size: calc(32 * var(--hud-u)); line-height: calc(36 * var(--hud-u)); }
 #tt .hd { display: flex; align-items: center; gap: calc(12 * var(--hud-u)); }
-#tt .hd img { width: calc(40 * var(--hud-u)); height: calc(40 * var(--hud-u)); }
-#tt .title .nm { font-size: calc(32 * var(--hud-u)); }
-#tt .title .sub { font-size: calc(18 * var(--hud-u)); margin-top: calc(12 * var(--hud-u)); }
+#tt .hd img { height: calc(40 * var(--hud-u)); width: auto; }
+#tt .title .sub { font-size: calc(18 * var(--hud-u)); line-height: calc(22 * var(--hud-u)); margin-top: calc(6 * var(--hud-u)); }
 #tt .title .sub span { color: var(--hud-text); }
-#tt .title svg { display: block; margin-top: calc(18 * var(--hud-u)); width: calc(300 * var(--hud-u)); height: auto; overflow: visible; }
+#tt .title svg { margin-top: calc(18 * var(--hud-u)); width: calc(300 * var(--hud-u)); height: auto; overflow: visible; filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }
 #tt .keys { display: flex; gap: calc(26 * var(--hud-u)); font-size: calc(17 * var(--hud-u)); font-weight: var(--hud-w-light); }
-#tt .keys b { font-weight: inherit; background: var(--hud-plate); border: 1px solid var(--hud-quiet); padding: calc(1 * var(--hud-u)) calc(7 * var(--hud-u)); margin-right: calc(6 * var(--hud-u)); }
-#tt .title .keys { margin-top: calc(20 * var(--hud-u)); }
+#tt .keys b { font-weight: inherit; background: var(--hud-plate); border: 1px solid var(--hud-quiet); padding: calc(1 * var(--hud-u)) calc(7 * var(--hud-u)); margin-right: calc(8 * var(--hud-u)); }
+#tt .title .keys { display: flex; margin-top: calc(18 * var(--hud-u)); line-height: calc(24 * var(--hud-u)); }
+#tt .title .keys b { background: none; border-color: var(--hud-text); box-shadow: 0 1px 2px rgba(0,0,0,.5); }
+#tt .title .cr { margin-top: calc(18 * var(--hud-u)); max-width: calc(300 * var(--hud-u)); white-space: normal; font-size: calc(11 * var(--hud-u)); line-height: 1.35; }
+#tt .title .cr a { color: inherit; pointer-events: auto; }
 #tt .count { top: calc(440 * var(--hud-u)); }
 #tt .count > .pl { padding: calc(10 * var(--hud-u)) calc(26 * var(--hud-u)) calc(14 * var(--hud-u)); font-size: calc(40 * var(--hud-u)); line-height: calc(48 * var(--hud-u)); font-weight: var(--hud-w-light); }
 #tt .count .bar { margin-top: calc(8 * var(--hud-u)); height: calc(3 * var(--hud-u)); background: var(--hud-track); }
 #tt .count .bar i { display: block; height: 100%; background: var(--hud-text); transform-origin: 0 0; transform: scaleX(0); will-change: transform; }
-#tt .go { top: calc(70 * var(--hud-u)); will-change: transform, opacity; }
-#tt .go > .pl { padding: calc(4 * var(--hud-u)) calc(30 * var(--hud-u)) calc(8 * var(--hud-u)); font-size: calc(96 * var(--hud-u)); line-height: calc(104 * var(--hud-u)); }
+#tt .go { top: calc(440 * var(--hud-u)); will-change: transform, opacity; }
+#tt .go > .pl { padding: calc(10 * var(--hud-u)) calc(26 * var(--hud-u)) calc(14 * var(--hud-u)); min-width: calc(56 * var(--hud-u)); font-size: calc(40 * var(--hud-u)); line-height: calc(48 * var(--hud-u)); font-weight: var(--hud-w-regular); }
+#tt .go .bar { margin-top: calc(8 * var(--hud-u)); height: calc(3 * var(--hud-u)); background: var(--hud-text); }
 #tt .lap { top: calc(548 * var(--hud-u)); will-change: transform, opacity; }
 #tt .lap > .pl { text-align: left; padding: calc(10 * var(--hud-u)) calc(20 * var(--hud-u)) calc(12 * var(--hud-u)); }
 #tt .lap .n { font-size: calc(15 * var(--hud-u)); line-height: calc(18 * var(--hud-u)); font-weight: var(--hud-w-light); }
@@ -335,8 +342,8 @@ export class TimeTrial {
     _buildHud() {
         const css = document.createElement('style'); css.textContent = CSS; document.head.appendChild(css);
         this.el = document.createElement('div'); this.el.id = 'tt';
-        this.el.innerHTML = '<div class="title pl"></div><div class="count mid"><div class="pl"><div></div><div class="bar"><i></i></div></div></div>'
-            + '<div class="go mid"><div class="pl">Go</div></div><div class="clock mid"><div class="pl"></div></div><div class="dist pl"></div>'
+        this.el.innerHTML = '<div class="title"></div><div class="count mid"><div class="pl"><div></div><div class="bar"><i></i></div></div></div>'
+            + '<div class="go mid"><div class="pl">Go<div class="bar"></div></div></div><div class="clock mid"><div class="pl"></div></div><div class="dist pl"></div>'
             + '<div class="lap mid"><div class="pl"><div class="n q"></div><div class="t"></div><div class="r"><span></span><span class="q"></span></div></div></div>'
             + '<div class="final mid"><div class="pl">Final lap</div></div><div class="delta mid"><div class="pl"></div></div><div class="fin"></div>';
         document.body.appendChild(this.el);
@@ -366,7 +373,7 @@ export class TimeTrial {
     // surveyed outline (track.js), the gates as short bars across their openings, and either the
     // planned line or the laps flown. The highlighted line runs accent to quiet like the path.
     _plan(lines) {
-        const P = SPONZA_PLAN, pad = 0.6, x0 = P.x[0] - pad, z0 = P.z[0] - pad, W = P.x[1] - P.x[0] + 2 * pad, H = P.z[1] - P.z[0] + 2 * pad;
+        const P = SPONZA_PLAN, pad = 0.1, x0 = P.x[0] - pad, z0 = P.z[0] - pad, W = P.x[1] - P.x[0] + 2 * pad, H = P.z[1] - P.z[0] + 2 * pad;
         const k = 900 / W, X = (x) => ((x - x0) * k).toFixed(1), Z = (z) => ((z - z0) * k).toFixed(1);
         const rect = (r) => `<rect class="wall" x="${X(r.x[0])}" y="${Z(r.z[0])}" width="${((r.x[1] - r.x[0]) * k).toFixed(1)}" height="${((r.z[1] - r.z[0]) * k).toFixed(1)}" stroke-width="1.5"/>`;
         const id = `pg${this._planN = (this._planN || 0) + 1}`;
@@ -396,10 +403,12 @@ export class TimeTrial {
 
     _titleCard() {
         const best = this.bestRun ? `, best <span>${formatTime(this.bestRun.ms)}</span>` : '';
-        const arm = this.keyLabel('arm');
-        this._html(this.ui.title, this._head(`<div class="nm">${this.track.name}</div>`) + `<div class="sub q lt">${this.laps} laps${best}</div>`
+        // Key hints as one pair of keycaps: the arm key (or "Switch" when a radio arms it) and Menu.
+        const arm = this.keyLabel('arm') || 'Switch';
+        this._html(this.ui.title, '<img class="badge" src="brand/cuds-badge.png" alt="CUDS">' + `<div class="nm">${this.track.name}</div><div class="sub q lt">${this.laps} laps${best}</div>`
             + this._plan([{ pts: this._courseLine(), w: 4, hi: true }])
-            + this._keys([[arm, arm ? 'Arm' : ''], [this.keyLabel('menu'), 'Menu']]) + (arm ? '' : '<div class="keys" style="margin-top:0">Arm to start</div>'));
+            + this._keys([[arm, 'Arm'], [this.keyLabel('menu'), 'Menu']])
+            + '<div class="cr q lt"><a href="https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza" target="_blank" rel="noopener">Sponza by Crytek (Frank Meinl, after Marko Dabrovic), PBR textures by Alexandre Pestana</a></div>');
     }
 
     _finishCard() {

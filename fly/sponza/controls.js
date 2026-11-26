@@ -83,80 +83,83 @@ function migrateV1() {
 }
 
 const CSS = `
-#pilot-panel { --bg: #212121; --hd: #2b2b2b; --in: #151515; --line: #3a3a3a; --fg: #f0f0f0; --dim: #aaa; --acc: #ffbb00; --ok: #3cb371;
+#pilot-panel { --bg: var(--hud-keyline); --hd: #202016; --in: #0d0d07; --line: rgba(163,193,173,.35); --fg: var(--hud-text); --dim: var(--hud-quiet); --acc: var(--hud-accent); --on-acc: var(--hud-keyline); --ok: var(--hud-good);
+  --btn: #2a2a20; --btn-hi: #36362a; --cell: #19190f;
   position: fixed; right: 12px; top: 12px; width: 580px; height: min(540px, calc(100vh - 24px)); display: none; flex-direction: column;
-  background: var(--bg); border: 1px solid #0c0c0c; border-radius: 2px; color: var(--fg); font: 12.5px/18px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg); border: 1px solid var(--hud-quiet); border-radius: 0; color: var(--fg); font: var(--hud-w-regular) 12.5px/18px var(--hud-font);
   font-variant-numeric: tabular-nums; color-scheme: dark; z-index: 20; }
 #pilot-panel.on { display: flex; }
 #pilot-panel * { box-sizing: border-box; }
-#pilot-panel header { display: flex; align-items: flex-end; gap: 2px; padding: 8px 8px 0; border-bottom: 2px solid var(--acc); flex: none; }
+#pilot-panel header { display: flex; align-items: flex-end; gap: 2px; padding: 8px 8px 0; border-bottom: 1px solid var(--line); flex: none; }
 #pilot-panel .tabs { display: flex; gap: 2px; flex: 1; }
-#pilot-panel .tabs button { height: 26px; padding: 0 18px; border: 0; border-radius: 0; background: #393b3a; color: var(--fg); font: 600 12.5px system-ui, sans-serif; cursor: pointer; }
-#pilot-panel .tabs button:hover { background: #4a4c4b; }
-#pilot-panel .tabs button.on { background: var(--acc); color: #1a1400; }
+#pilot-panel .tabs button { height: 26px; padding: 0 18px; border: 0; border-radius: 0; background: var(--btn); color: var(--fg); font: var(--hud-w-regular) 12.5px var(--hud-font); cursor: pointer; }
+#pilot-panel .tabs button:hover { background: var(--btn-hi); }
+#pilot-panel .tabs button.on { background: var(--acc); color: var(--on-acc); }
 #pilot-panel .x { height: 22px; margin-bottom: 2px; padding: 0 10px; }
 #pilot-panel .body { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+#pilot-panel .credit { flex: none; padding: 6px 10px 8px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11.5px; font-weight: var(--hud-w-light); }
+#pilot-panel .credit a { color: inherit; }
 #pilot-panel .pg { display: none; flex-direction: column; gap: 8px; } #pilot-panel .pg.on { display: flex; }
-#pilot-panel .box { background: #262626; border: 1px solid #1b1b1b; }
-#pilot-panel .hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 24px; padding: 0 8px; background: var(--hd); border-bottom: 1px solid #1b1b1b; color: var(--fg); font-size: 12px; }
+#pilot-panel .box { background: var(--cell); border: 1px solid var(--line); }
+#pilot-panel .hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 24px; padding: 0 8px; background: var(--hd); border-bottom: 1px solid var(--line); color: var(--fg); font-size: 12px; }
 #pilot-panel .hd .st { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#pilot-panel .hd .dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: #666; } #pilot-panel .hd .dot.on { background: var(--ok); }
+#pilot-panel .hd .dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: #555; } #pilot-panel .hd .dot.on { background: var(--ok); }
 #pilot-panel .in { padding: 8px; }
-#pilot-panel button.b { height: 24px; padding: 0 12px; border-radius: 2px; border: 1px solid #5a5a5a; background: #333; color: var(--fg); font: 12.5px system-ui, sans-serif; cursor: pointer; }
-#pilot-panel button.b:hover { background: #444; }
-#pilot-panel button.b.pri { background: var(--acc); border-color: var(--acc); color: #1a1400; font-weight: 600; }
-#pilot-panel button.b.pri:hover { background: #ffcc33; }
+#pilot-panel button.b { height: 24px; padding: 0 12px; border-radius: 0; border: 1px solid var(--line); background: var(--btn); color: var(--fg); font: var(--hud-w-regular) 12.5px var(--hud-font); cursor: pointer; }
+#pilot-panel button.b:hover { background: var(--btn-hi); }
+#pilot-panel button.b.pri { background: var(--acc); border-color: var(--acc); color: var(--on-acc); }
+#pilot-panel button.b.pri:hover { filter: brightness(1.12); }
 #pilot-panel button[hidden] { display: none; }
 #pilot-panel button:focus-visible, #pilot-panel input:focus-visible, #pilot-panel summary:focus-visible { outline: 1px solid var(--acc); outline-offset: 1px; }
 #pilot-panel .row { display: flex; gap: 8px; align-items: center; }
 #pilot-panel .row.r { justify-content: flex-end; }
 #pilot-panel .stepline { min-height: 36px; display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 #pilot-panel .cnt { color: var(--dim); white-space: nowrap; }
-#pilot-panel .prog { height: 3px; background: #333; margin: 0 0 8px; } #pilot-panel .prog i { display: block; height: 100%; width: 0; background: var(--acc); }
+#pilot-panel .prog { height: 3px; background: var(--btn); margin: 0 0 8px; } #pilot-panel .prog i { display: block; height: 100%; width: 0; background: var(--acc); }
 #pilot-panel .ch { display: grid; grid-template-columns: 84px 1fr 84px auto; gap: 8px; align-items: center; margin: 4px 0; min-height: 22px; }
-#pilot-panel .ch > b { text-align: right; font-weight: 700; }
+#pilot-panel .ch > b { text-align: right; font-weight: var(--hud-w-regular); }
 #pilot-panel .ch > em { font-style: normal; color: var(--dim); font-size: 11.5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-#pilot-panel .track { position: relative; height: 18px; border: 1px solid #555; border-radius: 3px; background: #1b1b1b; overflow: hidden; }
-#pilot-panel .track i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--c, #666); }
-#pilot-panel .track span { position: absolute; inset: 0; text-align: center; line-height: 16px; font-weight: 700; color: #fff; text-shadow: 0 0 3px #000, 0 0 2px #000; }
+#pilot-panel .track { position: relative; height: 18px; border: 1px solid var(--line); border-radius: 0; background: var(--in); overflow: hidden; }
+#pilot-panel .track i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--c, var(--hud-quiet)); }
+#pilot-panel .track span { position: absolute; inset: 0; text-align: center; line-height: 16px; color: #fff; text-shadow: 0 0 3px var(--hud-keyline), 0 0 2px var(--hud-keyline); }
 #pilot-panel details summary { cursor: pointer; padding: 0 8px; height: 24px; line-height: 24px; background: var(--hd); color: var(--fg); }
-#pilot-panel details[open] summary { border-bottom: 1px solid #1b1b1b; }
+#pilot-panel details[open] summary { border-bottom: 1px solid var(--line); }
 #pilot-panel table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-#pilot-panel th { height: 34px; font-weight: 400; text-align: center; color: var(--fg); background: #2b2b2b; border: 1px solid #1b1b1b; line-height: 15px; }
-#pilot-panel td { height: 32px; text-align: center; border: 1px solid #1b1b1b; }
-#pilot-panel td.lab { color: #101010; font-weight: 700; text-align: left; padding-left: 8px; background: var(--c); }
+#pilot-panel th { height: 34px; font-weight: 400; text-align: center; color: var(--fg); background: var(--hd); border: 1px solid var(--line); line-height: 15px; }
+#pilot-panel td { height: 32px; text-align: center; border: 1px solid var(--line); }
+#pilot-panel td.lab { color: var(--hud-keyline); text-align: left; padding-left: 8px; background: var(--c); }
 #pilot-panel td.n { font-weight: 400; }
 #pilot-panel th:first-child, #pilot-panel td.lab { width: 90px; }
-#pilot-panel input[type=number] { width: 72px; height: 22px; padding: 0 0 0 4px; text-align: center; border-radius: 2px; border: 1px solid #3c3c3c; background: #1b1b1b; color: #fff; font: 12.5px system-ui, sans-serif; font-variant-numeric: tabular-nums; }
-#pilot-panel input[type=number]:hover { border-color: #666; }
+#pilot-panel input[type=number] { width: 72px; height: 22px; padding: 0 0 0 4px; text-align: center; border-radius: 0; border: 1px solid var(--line); background: var(--in); color: #fff; font: 12.5px var(--hud-font); font-variant-numeric: tabular-nums; }
+#pilot-panel input[type=number]:hover { border-color: var(--hud-quiet); }
 #pilot-panel input[type=number]::-webkit-inner-spin-button { opacity: 1; height: 18px; }
-#pilot-panel canvas { width: 100%; height: 0; flex: 1; min-height: 160px; display: block; background: #1a1a1a; }
+#pilot-panel canvas { width: 100%; height: 0; flex: 1; min-height: 160px; display: block; background: var(--in); }
 #pilot-panel .pg[data-p=rates] { flex: 1; min-height: 0; } #pilot-panel .pg[data-p=rates] .box:last-child { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #pilot-panel .set { display: grid; grid-template-columns: 112px 1fr 72px 36px; gap: 8px; align-items: center; margin: 6px 0; }
-#pilot-panel .set > span:first-child { text-align: right; font-weight: 700; } #pilot-panel .set .u { color: var(--dim); }
-#pilot-panel input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; margin: 0; border-radius: 2px; cursor: pointer; background: linear-gradient(to right, var(--acc) var(--p, 50%), #444 var(--p, 50%)); }
-#pilot-panel input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 8px; height: 16px; border-radius: 2px; background: var(--acc); border: 1px solid #1a1400; }
+#pilot-panel .set > span:first-child { text-align: right; } #pilot-panel .set .u { color: var(--dim); }
+#pilot-panel input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; margin: 0; border-radius: 2px; cursor: pointer; background: linear-gradient(to right, var(--acc) var(--p, 50%), var(--btn-hi) var(--p, 50%)); }
+#pilot-panel input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 8px; height: 16px; border-radius: 2px; background: var(--acc); border: 1px solid var(--on-acc); }
 #pilot-panel .kg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 #pilot-panel .keys { width: 100%; }
 #pilot-panel .keys td { height: 28px; border: 0; text-align: left; padding: 0 0 0 8px; } #pilot-panel .keys td.k { width: 96px; text-align: right; padding: 0 0 0 0; white-space: nowrap; }
-#pilot-panel .keys tr:nth-child(even) td { background: rgba(255,255,255,.03); }
-#pilot-panel kbd { display: inline-block; min-width: 22px; height: 20px; line-height: 20px; padding: 0 6px; margin-left: 4px; text-align: center; font: 700 11.5px ui-monospace, Menlo, Consolas, monospace; border-radius: 2px; background: #3a3a3a; border-bottom: 2px solid #1c1c1c; color: #fff; }
+#pilot-panel .keys tr:nth-child(even) td { background: rgba(163,193,173,.05); }
+#pilot-panel kbd { display: inline-block; min-width: 22px; height: 20px; line-height: 20px; padding: 0 6px; margin-left: 4px; text-align: center; font: var(--hud-w-regular) 11.5px var(--hud-font); border-radius: 0; background: var(--btn); border: 1px solid var(--hud-quiet); color: #fff; }
 #pilot-panel button.s { height: 20px; padding: 0 7px; font-size: 11.5px; }
-#pilot-panel button.s.on { background: #5a4a10; border-color: var(--acc); color: #fff; }
+#pilot-panel button.s.on { background: var(--acc); border-color: var(--acc); color: var(--on-acc); }
 #pilot-panel .bt { display: flex; gap: 4px; justify-content: flex-end; min-width: 94px; }
-#pilot-panel .bind { width: 100%; } #pilot-panel .bind th { height: 26px; font-weight: 600; background: var(--hd); text-align: left; padding-left: 8px; }
-#pilot-panel .bind td { height: 30px; text-align: left; padding: 0 0 0 8px; } #pilot-panel .bind td.an { font-weight: 700; width: 120px; }
+#pilot-panel .bind { width: 100%; } #pilot-panel .bind th { height: 26px; font-weight: var(--hud-w-regular); background: var(--hd); text-align: left; padding-left: 8px; }
+#pilot-panel .bind td { height: 30px; text-align: left; padding: 0 0 0 8px; } #pilot-panel .bind td.an { width: 120px; }
 #pilot-panel .bind td.kk { width: 150px; white-space: nowrap; } #pilot-panel .bind .pc { white-space: nowrap; }
 #pilot-panel .bind .pt { display: inline-flex; gap: 4px; align-items: center; margin-right: 10px; } #pilot-panel .bind .pt i { font-style: normal; color: var(--dim); font-size: 11.5px; }
 #pilot-panel .bind .dimt { color: var(--dim); font-size: 11.5px; }
-#pilot-panel button.kc { min-width: 40px; height: 22px; padding: 0 7px; margin-right: 4px; border-radius: 2px; border: 1px solid #1c1c1c; border-bottom: 2px solid #1c1c1c; background: #3a3a3a; color: #fff; font: 700 11.5px ui-monospace, Menlo, Consolas, monospace; cursor: pointer; }
-#pilot-panel button.kc:hover:not(:disabled) { background: #4c4c4c; } #pilot-panel button.kc:disabled { color: #999; cursor: default; }
-#pilot-panel button.kc.wait { background: var(--acc); color: #1a1400; border-color: var(--acc); }
+#pilot-panel button.kc { min-width: 40px; height: 22px; padding: 0 7px; margin-right: 4px; border-radius: 0; border: 1px solid var(--hud-quiet); background: var(--btn); color: #fff; font: var(--hud-w-regular) 11.5px var(--hud-font); cursor: pointer; }
+#pilot-panel button.kc:hover:not(:disabled) { background: var(--btn-hi); } #pilot-panel button.kc:disabled { color: var(--hud-quiet); opacity: .6; cursor: default; }
+#pilot-panel button.kc.wait { background: var(--acc); color: var(--on-acc); border-color: var(--acc); }
 #pilot-panel tr.sel td.lab { box-shadow: inset 4px 0 0 #fff; } #pilot-panel td.lab { cursor: pointer; }
 #pilot-cam { position: fixed; left: calc(40 * var(--hud-u)); bottom: calc(30 * var(--hud-u)); display: flex; align-items: center; gap: calc(8 * var(--hud-u)); pointer-events: none;
   padding: calc(4 * var(--hud-u)) calc(12 * var(--hud-u)); background: var(--hud-plate); color: var(--hud-text); font-family: var(--hud-font); font-style: var(--hud-style);
   font-weight: var(--hud-w-light); font-size: calc(20 * var(--hud-u)); line-height: calc(24 * var(--hud-u)); font-variant-numeric: var(--hud-num); }
-#pilot-cam svg { width: calc(26 * var(--hud-u)); height: calc(20 * var(--hud-u)); fill: none; stroke: var(--hud-quiet); stroke-width: 2.4; stroke-linecap: round; overflow: visible; }
+#pilot-cam svg { width: calc(26 * var(--hud-u)); height: calc(20 * var(--hud-u)); fill: none; stroke: var(--hud-text); stroke-width: 2.4; stroke-linecap: round; overflow: visible; }
 #pilot-cam.hit { color: var(--hud-accent); } #pilot-cam.hit svg { stroke: var(--hud-accent); }
 #pilot-sticks { position: fixed; left: 50%; bottom: calc(30 * var(--hud-u)); transform: translateX(-50%); display: flex; gap: calc(14 * var(--hud-u)); pointer-events: none; }
 #pilot-sticks .gimbal { position: relative; width: calc(56 * var(--hud-u)); height: calc(56 * var(--hud-u)); box-sizing: border-box; background: var(--hud-plate-soft); border: 1px solid var(--hud-quiet); }
@@ -265,7 +268,8 @@ export class PilotUI {
           </section>
           <section class="pg" data-p="bindings"><div class="box"><table class="bind"><thead><tr><th>Action</th><th>Keyboard</th><th>Controller</th></tr></thead><tbody></tbody></table></div>
             <div class="row r"><button class="b" data-a="keydef">Reset keys</button></div></section>
-        </div>`;
+        </div>
+        <footer class="credit">Map: <a href="https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza" target="_blank" rel="noopener">Sponza by Crytek (Frank Meinl, after Marko Dabrovic), PBR textures by Alexandre Pestana</a></footer>`;
         document.body.append(p);
         this.panel = p; this.stepEl = p.querySelector('.stepline'); this.txtEl = p.querySelector('.txt'); this.cntEl = p.querySelector('.cnt'); this.progEl = p.querySelector('.prog i');
         this.axesEl = p.querySelector('.axes'); this.canvas = p.querySelector('canvas'); this.chansEl = p.querySelector('.chans'); this.bindBody = p.querySelector('.bind tbody');
@@ -453,7 +457,7 @@ export class PilotUI {
         this._gm = { W, H, top, X, Y };
         c.strokeStyle = '#8a8a8a'; c.lineWidth = 1;
         c.beginPath(); c.moveTo(0, Math.round(H / 2) + .5); c.lineTo(W, Math.round(H / 2) + .5); c.moveTo(Math.round(W / 2) + .5, 0); c.lineTo(Math.round(W / 2) + .5, H); c.stroke();
-        c.font = '11px system-ui, sans-serif'; c.fillStyle = '#8a8a8a'; c.textAlign = 'center'; c.textBaseline = 'top'; c.fillText(`${top} deg/s`, W / 2, 3);
+        c.font = '11px Ubuntu, system-ui, sans-serif'; c.fillStyle = '#8a8a8a'; c.textAlign = 'center'; c.textBaseline = 'top'; c.fillText(`${top} deg/s`, W / 2, 3);
         c.textBaseline = 'bottom'; c.fillText(`-${top} deg/s`, W / 2, H - 3);
         c.lineJoin = 'round';
         const sel = this.selAxis, order = [...AXES].reverse().sort((a, b) => (a[0] === sel) - (b[0] === sel));
@@ -465,7 +469,7 @@ export class PilotUI {
         c.globalAlpha = 1;
         // Chips: curve ends on the right, live stick values on the left.
         const chip = (txt, col, x, y, align) => {
-            c.font = '600 11px system-ui, sans-serif'; const w = c.measureText(txt).width + 12;
+            c.font = '11px Ubuntu, system-ui, sans-serif'; const w = c.measureText(txt).width + 12;
             const x0 = align === 'right' ? x - w : x; c.fillStyle = col; c.fillRect(x0, y, w, 16);
             c.fillStyle = '#111'; c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillText(txt, x0 + 6, y + 8.5);
         };
@@ -480,7 +484,7 @@ export class PilotUI {
         // Handles of the selected axis.
         const col = AXES.find(([a]) => a === sel)[2];
         this._hp = this._handles();
-        c.font = '10.5px system-ui, sans-serif'; c.textAlign = 'left'; c.textBaseline = 'middle';
+        c.font = '10.5px Ubuntu, system-ui, sans-serif'; c.textAlign = 'left'; c.textBaseline = 'middle';
         for (const [h, [px, py]] of Object.entries(this._hp)) {
             c.fillStyle = col; c.strokeStyle = '#fff'; c.lineWidth = 2; c.fillRect(px - 5, py - 5, 10, 10); c.strokeRect(px - 5, py - 5, 10, 10);
             c.fillStyle = '#d0d0d0'; c.fillText(h === 'max' ? 'Max' : h === 'center' ? 'Center' : 'Expo', h === 'max' ? px - 28 : px + 9, h === 'max' ? Math.max(8, py - 12) : py - 8);
@@ -556,6 +560,14 @@ export class PilotUI {
         addEventListener('keydown', (e) => {
             if (this.cap) { e.preventDefault(); e.stopImmediatePropagation(); this._capKey(e); return; }
             if (this.bind && e.code === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); this._endBind(); return; }
+            // Tab / Shift+Tab cycle the menu's tabs while it is open (not the browser's focus jump);
+            // a key being captured for a binding is handled above, so Tab still binds there.
+            if (e.code === 'Tab' && this.paused && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                e.preventDefault(); e.stopImmediatePropagation();
+                const i = TABS.findIndex(([t]) => t === this.tab), n = TABS.length;
+                this._tab(TABS[(i + (e.shiftKey ? n - 1 : 1)) % n][0]);
+                return;
+            }
             if (e.target.closest?.('#pilot-panel') || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
             const hit = this._findKey(e.code);
             if (!hit) { if (LEGACY.has(e.code)) e.stopImmediatePropagation(); return; }
@@ -719,7 +731,7 @@ export class PilotUI {
         if (pad !== this._padTxt) { this.padTxt.textContent = pad; this.padDot.classList.toggle('on', !!g); this._padTxt = pad; }
         if (!g) { if (this.axesEl.children.length) this.axesEl.innerHTML = ''; return; }
         if (this.axesEl.children.length !== g.axes.length) {
-            this.axesEl.innerHTML = g.axes.map((_, k) => `<div class="ch" style="--c:#8a8a8a"><b>Axis ${k}</b><div class="track"><i></i><span></span></div><em></em><span></span></div>`).join('');
+            this.axesEl.innerHTML = g.axes.map((_, k) => `<div class="ch" style="--c:var(--hud-quiet)"><b>Axis ${k}</b><div class="track"><i></i><span></span></div><em></em><span></span></div>`).join('');
         }
         const roles = (k) => Object.entries(m).filter(([, s]) => s.axis === k).map(([r]) => r).join(' ');
         g.axes.forEach((v, k) => {

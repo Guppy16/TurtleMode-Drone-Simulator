@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- Credits: Sponza by Crytek (Frank Meinl, after Marko Dabrovic), PBR textures by Alexandre Pestana. https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Sponza -->
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -38,6 +39,7 @@
             --hud-plan-line: #fff;
             --hud-debug: rgba(255,255,255,.55);
             --hud-dim-text: rgba(255,255,255,.7); /* the fps readout */
+            --hud-title-shadow: 0 1px 2px rgba(0,0,0,.75), 0 0 10px rgba(0,0,0,.45); /* the plate-less title card */
         }
         /* Readouts on the small plate the camera angle uses (controls.js #pilot-cam): fps top right,
            speed above the camera angle, and a brief toast for arm / reset / recover. */
@@ -48,7 +50,7 @@
         #hud.raw { right: 10px; top: auto; bottom: 8px; padding: 0; background: none; white-space: pre; color: var(--hud-debug); font: 11px/1.4 ui-monospace, Menlo, monospace; }
         #spd { left: calc(40 * var(--hud-u)); bottom: calc(70 * var(--hud-u)); color: var(--hud-text); font-weight: var(--hud-w-light); }
         #spd b { display: inline-block; min-width: 2ch; text-align: right; font-weight: inherit; }
-        #spd small { font-size: calc(14 * var(--hud-u)); color: var(--hud-quiet); margin-left: calc(5 * var(--hud-u)); }
+        #spd small { font-size: calc(14 * var(--hud-u)); color: var(--hud-text); margin-left: calc(5 * var(--hud-u)); }
         #toast { left: 50%; top: calc(128 * var(--hud-u)); color: var(--hud-text); font-weight: var(--hud-w-regular); opacity: 0; will-change: transform, opacity; }
         #msg { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; background: rgba(0,0,0,.55); white-space: pre-line; }
         #msg.hidden { display: none; }
@@ -57,7 +59,7 @@
             font: var(--hud-w-light) 16px/1.5 var(--hud-font); }
         #nogpu .card { max-width: 560px; }
         #nogpu .hd { display: flex; align-items: center; gap: 14px; }
-        #nogpu .hd img { width: 44px; height: 44px; }
+        #nogpu .hd img { height: 44px; width: auto; }
         #nogpu h1 { margin: 0; font-weight: var(--hud-w-regular); font-size: 28px; line-height: 1.2; }
         #nogpu .why { margin: 14px 0 22px; color: var(--hud-quiet); }
         #nogpu ul { margin: 0; padding: 0; list-style: none; border-top: 1px solid rgba(163,193,173,.35); }
