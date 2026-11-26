@@ -5,10 +5,8 @@ usage: python3 -I cdp.py <repo_dir> <mode> [args...]
   mem <map> [flags...]      -> load map via window.simulator.start, fly, report PSS per process type
   fps <map> [flags...]      -> frame rate with shadows on / frozen / off
   bench <path?query> [flags...] -> open a page that publishes window.benchResult and print it
-                                   (BENCH_SHOT=<png> screenshot,
-                                    BENCH_MEM=1 adds PSS / heap / GPU memory)
-  record <path?query> <outdir> [flags...] -> step window.recStep(i) and screenshot each frame
-                                             into outdir
+                                   (BENCH_SHOT=<png> screenshot, BENCH_MEM=1 adds PSS / heap / GPU memory)
+  record <path?query> <outdir> [flags...] -> step window.recStep(i) and screenshot each frame into outdir
   bake <path?query> <outdir> [flags...] -> run a bake page and write its world files to outdir
 
 For uncapped frame rates pass --disable-gpu-vsync --disable-frame-rate-limit.
@@ -63,13 +61,11 @@ def pss_by_type(profile):
         if not pid.isdigit():
             continue
         try:
-            with open(f'/proc/{pid}/cmdline', 'rb') as f:
-                cmd = f.read().replace(b'\0', b' ').split()
+            cmd = open(f'/proc/{pid}/cmdline', 'rb').read().replace(b'\0', b' ').split()
         except OSError:
             continue
         try:
-            with open(f'/proc/{pid}/stat') as f:
-                sid = int(f.read().rsplit(')', 1)[1].split()[3])
+            sid = int(open(f'/proc/{pid}/stat').read().rsplit(')', 1)[1].split()[3])
         except Exception:
             continue
         if sid != SESSION[0]:
@@ -81,10 +77,9 @@ def pss_by_type(profile):
             if c.startswith(b'--utility-sub-type='):
                 typ = 'util:' + c[19:].decode().split('.')[-1]
         try:
-            with open(f'/proc/{pid}/smaps_rollup') as f:
-                for line in f:
-                    if line.startswith('Pss:'):
-                        out[typ] = out.get(typ, 0) + int(line.split()[1]) / 1024
+            for line in open(f'/proc/{pid}/smaps_rollup'):
+                if line.startswith('Pss:'):
+                    out[typ] = out.get(typ, 0) + int(line.split()[1]) / 1024
         except OSError:
             pass
     return out
@@ -97,29 +92,26 @@ def gpu_drm_mb():
         if not pid.isdigit():
             continue
         try:
-            with open(f'/proc/{pid}/cmdline', 'rb') as f:
-                if b'--type=gpu-process' not in f.read():
-                    continue
-            with open(f'/proc/{pid}/stat') as f:
-                sid = int(f.read().rsplit(')', 1)[1].split()[3])
+            if b'--type=gpu-process' not in open(f'/proc/{pid}/cmdline', 'rb').read():
+                continue
+            sid = int(open(f'/proc/{pid}/stat').read().rsplit(')', 1)[1].split()[3])
             if sid != SESSION[0]:
                 continue
             seen = set()
             for fd in os.listdir(f'/proc/{pid}/fdinfo'):
                 try:
-                    with open(f'/proc/{pid}/fdinfo/{fd}') as f:
-                        txt = f.read()
+                    txt = open(f'/proc/{pid}/fdinfo/{fd}').read()
                 except OSError:
                     continue
                 if 'drm-client-id' not in txt:
                     continue
-                cid = [ln for ln in txt.splitlines() if ln.startswith('drm-client-id')][0]
+                cid = [l for l in txt.splitlines() if l.startswith('drm-client-id')][0]
                 if cid in seen:
                     continue
                 seen.add(cid)
-                for ln in txt.splitlines():
-                    if 'memory' in ln and ':' in ln:
-                        k, v = ln.split(':', 1)
+                for l in txt.splitlines():
+                    if 'memory' in l and ':' in l:
+                        k, v = l.split(':', 1)
                         parts = v.split()
                         mb = int(parts[0]) / (
                             1024 if parts[1:] == ['KiB'] else 1048576 if parts[1:] == [] else 1
@@ -131,10 +123,9 @@ def gpu_drm_mb():
 
 
 def mem_available():
-    with open('/proc/meminfo') as f:
-        for line in f:
-            if line.startswith('MemAvailable:'):
-                return int(line.split()[1]) / 1024
+    for line in open('/proc/meminfo'):
+        if line.startswith('MemAvailable:'):
+            return int(line.split()[1]) / 1024
 
 
 class CDP:
@@ -174,50 +165,16 @@ PROBE_JS = r"""(async () => {
   const c = document.createElement('canvas'); const gl = c.getContext('webgl2');
   if (gl) { const d = gl.getExtension('WEBGL_debug_renderer_info');
     out.webgl = d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); }
-  out.compressed = gl
-    ? gl.getSupportedExtensions().filter(e => /compress|multi_draw|clip_cull|float_blend/.test(e))
-    : null;
+  out.compressed = gl ? gl.getSupportedExtensions().filter(e => /compress|multi_draw|clip_cull|float_blend/.test(e)) : null;
   out.maxTex = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : null;
   out.hasGPU = !!navigator.gpu;
   if (navigator.gpu) { try { const a = await navigator.gpu.requestAdapter();
-      out.adapter = a ? {
-        info: a.info
-          ? {vendor: a.info.vendor, arch: a.info.architecture, desc: a.info.description}
-          : null,
-        fallback: a.isFallbackAdapter, features: [...a.features].length,
-        maxBuf: a.limits.maxBufferSize,
-        feat: [...a.features].filter(f => /texture-compression|timestamp|indirect/.test(f)),
-      } : null;
+      out.adapter = a ? { info: a.info ? {vendor: a.info.vendor, arch: a.info.architecture, desc: a.info.description} : null,
+                          fallback: a.isFallbackAdapter, features: [...a.features].length,
+                          maxBuf: a.limits.maxBufferSize, feat: [...a.features].filter(f => /texture-compression|timestamp|indirect/.test(f)) } : null;
       if (a) { const dev = await a.requestDevice(); out.device = !!dev; dev.destroy(); }
     } catch (e) { out.adapterErr = String(e); } }
   return out; })()"""
-
-# Average requestAnimationFrame rate over 5 s.
-FPS_SAMPLE_JS = """new Promise(res => {
-  let n = 0;
-  const t0 = performance.now();
-  const f = () => {
-    n++;
-    if (performance.now() - t0 < 5000) requestAnimationFrame(f);
-    else res(+(n / ((performance.now() - t0) / 1000)).toFixed(1));
-  };
-  requestAnimationFrame(f);
-})"""
-
-SHADOWS_OFF_JS = """
-simulator.renderer.renderer.shadowMap.autoUpdate = true;
-simulator.renderer.renderer.shadowMap.enabled = false;
-simulator.renderer.scene.traverse(o => { if (o.material) o.material.needsUpdate = true });
-1"""
-
-RENDER_INFO_JS = """(() => {
-  const r = window.simulator.renderer.renderer;
-  const fps = document.getElementById('fps-counter').textContent;
-  return {
-    geometries: r.info.memory.geometries, textures: r.info.memory.textures,
-    calls: r.info.render.calls, tris: r.info.render.triangles, fps,
-  };
-})()"""
 
 
 async def fit_viewport(c, page):
@@ -302,8 +259,9 @@ async def run(repo, mode, args):
                 for i in range(n):
                     await c.ev(f'window.recStep({i})', timeout=60)
                     img = await c.call('Page.captureScreenshot', format='jpeg', quality=92)
-                    with open(os.path.join(outdir, f'f{i:04d}.jpg'), 'wb') as f:
-                        f.write(base64.b64decode(img['data']))
+                    open(os.path.join(outdir, f'f{i:04d}.jpg'), 'wb').write(
+                        base64.b64decode(img['data'])
+                    )
                 print(json.dumps({'outdir': outdir, 'frames': n}))
                 return
             if mode == 'bake':
@@ -345,13 +303,11 @@ async def run(repo, mode, args):
                     raw = base64.b64decode(b)
                     # mtime=0 so the same world always produces byte-identical files
                     gz = gzip.compress(raw, compresslevel=9, mtime=0)
-                    with open(os.path.join(outdir, names[k]), 'wb') as f:
-                        f.write(gz)
+                    open(os.path.join(outdir, names[k]), 'wb').write(gz)
                     sizes[names[k]] = [len(raw), len(gz)]
                 meta = out['meta']
                 meta['files'] = names
-                with open(os.path.join(outdir, 'world.json'), 'w') as f:
-                    f.write(json.dumps(meta, indent=1))
+                open(os.path.join(outdir, 'world.json'), 'w').write(json.dumps(meta, indent=1))
                 print(json.dumps({'outdir': outdir, 'bakeMs': meta.get('bakeMs'), 'sizes': sizes}))
                 return
             if mode == 'bench':
@@ -412,8 +368,7 @@ async def run(repo, mode, args):
                     import base64
 
                     img = await c.call('Page.captureScreenshot', format='png')
-                    with open(shot, 'wb') as f:
-                        f.write(base64.b64decode(img['data']))
+                    open(shot, 'wb').write(base64.b64decode(img['data']))
                 print(json.dumps({'result': res, 'flags': flags, 'console': errs[:8]}))
                 return
             if mode == 'fps':
@@ -424,14 +379,61 @@ async def run(repo, mode, args):
                     await asyncio.sleep(0.2)
                 await asyncio.sleep(1)
 
-                g0 = gpu_drm_mb()
+                def gpumem():
+                    tot = {}
+                    for pid in os.listdir('/proc'):
+                        if not pid.isdigit():
+                            continue
+                        try:
+                            if (
+                                b'--type=gpu-process'
+                                not in open(f'/proc/{pid}/cmdline', 'rb').read()
+                            ):
+                                continue
+                            sid = int(open(f'/proc/{pid}/stat').read().rsplit(')', 1)[1].split()[3])
+                            if sid != SESSION[0]:
+                                continue
+                            seen = set()
+                            for fd in os.listdir(f'/proc/{pid}/fdinfo'):
+                                try:
+                                    txt = open(f'/proc/{pid}/fdinfo/{fd}').read()
+                                except OSError:
+                                    continue
+                                if 'drm-client-id' not in txt:
+                                    continue
+                                cid = [
+                                    l for l in txt.splitlines() if l.startswith('drm-client-id')
+                                ][0]
+                                if cid in seen:
+                                    continue
+                                seen.add(cid)
+                                for l in txt.splitlines():
+                                    if 'memory' in l and ':' in l:
+                                        k, v = l.split(':', 1)
+                                        parts = v.split()
+                                        mb = int(parts[0]) / (
+                                            1024
+                                            if parts[1:] == ['KiB']
+                                            else 1048576
+                                            if parts[1:] == []
+                                            else 1
+                                        )
+                                        tot[k] = round(tot.get(k, 0) + mb)
+                        except OSError:
+                            pass
+                    return tot
+
+                g0 = gpumem()
                 await c.ev(f"window.simulator.start({json.dumps(pos[0])}).then(() => 'ok')")
                 await asyncio.sleep(3)
-                a = await c.ev(FPS_SAMPLE_JS)
+                SAMPLE = '''new Promise(res => { let n = 0; const t0 = performance.now(); const f = () => { n++; if (performance.now() - t0 < 5000) requestAnimationFrame(f); else res(+(n / ((performance.now() - t0) / 1000)).toFixed(1)); }; requestAnimationFrame(f); })'''
+                a = await c.ev(SAMPLE)
                 await c.ev('simulator.renderer.renderer.shadowMap.autoUpdate = false; 1')
-                b = await c.ev(FPS_SAMPLE_JS)
-                await c.ev(SHADOWS_OFF_JS)
-                d = await c.ev(FPS_SAMPLE_JS)
+                b = await c.ev(SAMPLE)
+                await c.ev(
+                    'simulator.renderer.renderer.shadowMap.autoUpdate = true; simulator.renderer.renderer.shadowMap.enabled = false; simulator.renderer.scene.traverse(o => { if (o.material) o.material.needsUpdate = true }); 1'
+                )
+                d = await c.ev(SAMPLE)
                 print(
                     json.dumps(
                         {
@@ -441,7 +443,7 @@ async def run(repo, mode, args):
                             'fps_shadow_frozen': b,
                             'fps_no_shadows': d,
                             'gpu_drm_before_MB': g0,
-                            'gpu_drm_after_MB': gpu_drm_mb(),
+                            'gpu_drm_after_MB': gpumem(),
                         }
                     )
                 )
@@ -464,7 +466,8 @@ async def run(repo, mode, args):
             await c.call('HeapProfiler.collectGarbage')
             await asyncio.sleep(1)
             heap = await c.call('Runtime.getHeapUsage')
-            info = await c.ev(RENDER_INFO_JS)
+            info = await c.ev("""(() => { const r = window.simulator.renderer.renderer; const fps = document.getElementById('fps-counter').textContent;
+                return { geometries: r.info.memory.geometries, textures: r.info.memory.textures, calls: r.info.render.calls, tris: r.info.render.triangles, fps }; })()""")
             after = pss_by_type(profile)
             print(
                 json.dumps(

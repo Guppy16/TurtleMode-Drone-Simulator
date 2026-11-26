@@ -39,6 +39,9 @@ export const SPONZA_TRACK = {
         { name: 'West', x: -9.78, y: 4.32, z: 0.0, yaw: 180, via: [[-7.8, 4.32, -3.7], [-9.5, 4.32, -3.2]] },
     ],
 };
+// The gallery's surveyed outline (from the numbers above), for the HUD's top-down plan: the ring's
+// outer walls and the opening over the courtyard. x, z in metres.
+export const SPONZA_PLAN = { x: [-11.25, 10.4], z: [-5.1, 4.6], opening: { x: [-7.6, 6.7], z: [-1.3, 1.3] } };
 // Start: on the gallery floor at the north-west corner, facing along the north walkway.
 export const SPONZA_TRACK_SPAWN = { x: -9.4, y: 3.32, z: 3.3, yaw: 90 };
 

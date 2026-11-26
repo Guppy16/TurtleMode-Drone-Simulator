@@ -48,7 +48,7 @@ def to_blocks(a):
     """HxWxC -> (N,16,C), padding to a multiple of 4 by edge repeat."""
     h, w, c = a.shape
     H, W = (h + 3) // 4 * 4, (w + 3) // 4 * 4
-    if (h, w) != (H, W):
+    if (H, W) != (h, w):
         a = np.pad(a, ((0, H - h), (0, W - w), (0, 0)), mode='edge')
     return a.reshape(H // 4, 4, W // 4, 4, c).transpose(0, 2, 1, 3, 4).reshape(-1, 16, c)
 
