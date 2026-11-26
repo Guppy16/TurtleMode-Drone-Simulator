@@ -52,7 +52,65 @@
         #toast { left: 50%; top: calc(128 * var(--hud-u)); color: var(--hud-text); font-weight: var(--hud-w-regular); opacity: 0; will-change: transform, opacity; }
         #msg { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; background: rgba(0,0,0,.55); white-space: pre-line; }
         #msg.hidden { display: none; }
+        /* No WebGPU: a full-page note instead of the sim (see the check below). */
+        #nogpu { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; background: var(--hud-keyline); color: var(--hud-text);
+            font: var(--hud-w-light) 16px/1.5 var(--hud-font); }
+        #nogpu .card { max-width: 560px; }
+        #nogpu .hd { display: flex; align-items: center; gap: 14px; }
+        #nogpu .hd img { width: 44px; height: 44px; }
+        #nogpu h1 { margin: 0; font-weight: var(--hud-w-regular); font-size: 28px; line-height: 1.2; }
+        #nogpu .why { margin: 14px 0 22px; color: var(--hud-quiet); }
+        #nogpu ul { margin: 0; padding: 0; list-style: none; border-top: 1px solid rgba(163,193,173,.35); }
+        #nogpu li { padding: 9px 0; border-bottom: 1px solid rgba(163,193,173,.35); }
+        #nogpu b { font-weight: var(--hud-w-regular); color: var(--hud-accent); }
+        #nogpu code { font-family: var(--hud-font); font-weight: var(--hud-w-regular); background: #202016; padding: 1px 6px; }
+        #nogpu .note { margin-top: 18px; font-size: 13px; color: var(--hud-quiet); }
     </style>
+    <!-- WebGPU check, before anything heavy: the sim's module (below, held as text) is only
+         started once navigator.gpu gives a hardware adapter. Otherwise a short note on how to
+         get WebGPU replaces it. No external requests; relative paths only. -->
+    <script>
+    window.gpuCheck = (async () => {
+        let why = '', adapter = null, note = '';
+        try {
+            if (!navigator.gpu) why = 'This browser does not offer WebGPU (no navigator.gpu).';
+            else {
+                adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+                if (!adapter) why = 'WebGPU is there, but no graphics adapter was offered (it may be blocked or disabled).';
+                else {
+                    const info = adapter.info || {}, desc = `${info.vendor || ''} ${info.architecture || ''} ${info.description || ''}`.toLowerCase();
+                    if (adapter.isFallbackAdapter || info.isFallbackAdapter || /swiftshader|llvmpipe|software/.test(desc)) why = 'WebGPU is only running in software here (no hardware GPU), which is far too slow for the sim.';
+                    if (!adapter.features.has('texture-compression-bc')) note = 'This GPU has no BC texture compression; textures load uncompressed (more memory, slower start).';
+                }
+            }
+        } catch (e) { why = `WebGPU failed to start (${e && e.message || e}).`; }
+        return { ok: !why, why, note };
+    })();
+    addEventListener('DOMContentLoaded', async () => {
+        const r = await window.gpuCheck;
+        window.gpuNote = r.note;
+        if (r.ok) {
+            const s = document.createElement('script'); s.type = 'module';
+            s.textContent = document.getElementById('sim-src').textContent;
+            document.body.appendChild(s);
+            return;
+        }
+        document.getElementById('msg').classList.add('hidden');
+        const d = document.createElement('div'); d.id = 'nogpu';
+        d.innerHTML = `<div class="card"><div class="hd"><img src="brand/cuds-badge.png" alt=""><h1>This sim needs WebGPU</h1></div>
+            <p class="why"></p>
+            <ul>
+                <li><b>Chrome or Edge</b> 113 or newer on Windows or macOS: on by default.</li>
+                <li><b>Safari</b> 26 or newer: on by default, as far as we know.</li>
+                <li><b>Chrome or Brave on Linux</b>: start it with <code>--enable-unsafe-webgpu --enable-features=Vulkan</code>.</li>
+                <li><b>Firefox</b> 141 or newer on Windows; elsewhere, try <code>dom.webgpu.enabled</code> in about:config.</li>
+            </ul>
+            <p class="note">Browser support changes quickly; if it still fails, update the browser and the graphics driver.</p></div>`;
+        d.querySelector('.why').textContent = r.why;
+        document.body.appendChild(d);
+        window.benchResult = { nogpu: r.why };
+    });
+    </script>
     <script type="importmap">
         {
             "imports": {
@@ -71,7 +129,7 @@
 <div id="spd"><b></b><small>km/h</small></div>
 <div id="toast"></div>
 <div id="msg">Loading…</div>
-<script type="module">
+<script type="text/plain" id="sim-src">
 // Sponza atrium, flown as a tiny whoop, WebGPU only (three r187).
 //
 // Look: the three.js lightprobes_sponza example - a physical SunLight with cascaded shadows, a
