@@ -35,3 +35,6 @@ fd3ecd1e7d426813607f2829a1f767c0473ddbf3b3507d1cc9cca888a6839e31  ./addons/light
 91ed221ce39adfe9a7a29a3fda78050aa2da161f1829f9abe9957ada278aff73  ./addons/utils/MeshletGeometryUtils.js
 07f08ffbee4400f0fc2cbf5df5870eb75cf7a16b5311427c8026c7be9815994e  ./addons/libs/meshopt_clusterizer.module.js
 614402ffac05c8a40711f0d9a5d9a904dadc3ee2e7ed56d4568751dbd7fc8c35  ./addons/libs/meshopt_simplifier.module.js
+397ca1a38d5f31681c86705df052271eaff230b52848f768b6dd9ed482f4ae0a  ./addons/tsl/display/SMAANode.js
+b5f0f0e226065a708aa225bcaeaf0054d0872eafa3d6766b14a44308a5812c07  ./addons/tsl/display/TAAUNode.js
+c0ebc0ccd6ab51852958f2fcd5b04d99c550b016c750b87c94e96e50460f9301  ./addons/loaders/DDSLoader.js
