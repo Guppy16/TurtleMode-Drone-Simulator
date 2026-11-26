@@ -9,7 +9,7 @@ hosted on GitHub Pages. Two modes: **Practice**, free flight with every paramete
 
 | Concern | Choice |
 | --- | --- |
-| Rendering | Three.js `0.160.0` |
+| Rendering | Three.js `0.187.0` |
 | Physics | Cannon-es `0.20.0` (rigid body integration; contacts are custom) |
 | Collision geometry | three-mesh-bvh `0.7.3` |
 | Audio | Web Audio API (synthesised, no sample files) |
